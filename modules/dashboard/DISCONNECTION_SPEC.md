@@ -19,8 +19,8 @@
 - Who records the payment? Ang staff. Ire-record niya ang payment at ang ₱100 fee, tapos i-vi-verify bago ma-mark na Reconnected.
 
 ## Rule 4: Messages to the customer
-- Warning message is sent on day: __sms____
-- Disconnection message is sent on day: __sms____
+- Warning message is sent on day: 1 (via SMS and email)
+- Disconnection message is sent on day: 3 (via SMS and email)
 
 ## Questions to ask the client
 ## Client answers
