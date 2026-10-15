@@ -1,0 +1,21 @@
+# Billing automation
+
+Verified payment confirmations are sent on the next minute-by-minute scheduled check, independently of the daily reminder time, while automation is enabled. Selected SMS/email/Telegram channels apply. Failed payment confirmations retry after six hours, up to three attempts. Invoice and due/overdue reminders retain the configured daily schedule.
+
+Windows quick setup: copy the whole project to XAMPP's htdocs, import the database, start MySQL, and double-click install-notification-task.bat in the project root. Keep scripts/install_notification_task.ps1 with the project. The installer detects the project and PHP paths, checks the database connection without sending messages, and creates or updates the minute-by-minute scheduled task. It runs while the installing Windows user is logged in and the laptop is awake; locking the screen is fine. Set the sending time and channels in Billing Automation settings. Rerun the installer after moving the project. Setup does not import the database or start MySQL automatically.
+
+Run database/migrate_telegram.php and database/migrate_automation.php with PHP CLI when deploying to an existing database. These migrations preserve existing records.
+
+Run database/migrate_plan_catalog.php after the automation migration. It populates Residential, Business, and Lease Line categories with ten speed/rate options from the supplied price sheet. Business 200 Mbps is PHP 3,499/month as confirmed by the user. Manage the options at modules/services/plans.php. Existing services and configured plans are preserved.
+
+Each customer retains their customer identifier. Every subscription has a separate ACC service account. Use Add Another Service under Customer Profile, then choose an internet plan or an unrelated service. Change Plan / Schedule updates future invoices only. Monthly rates multiply by 3 for quarterly billing and 12 for annual billing; there is no prorating. Existing invoices preserve plan name and service account snapshots.
+
+Configure automation at modules/billing/automation.php. Telegram and email are the default channels. Enable SMS only after the Semaphore sender is approved. Customers must start the bot and have their own chat IDs saved. Never reuse a staff chat ID for unrelated customers.
+
+Run database/migrate_notification_time.php when deploying the daily schedule. Run `C:\xampp\php\php.exe scripts\run_billing.php --scheduled` every minute using Windows Task Scheduler. On another hosting server, schedule its PHP binary against the absolute path to scripts/run_billing.php with --scheduled using cron. The worker checks the admin-selected Philippine send time (default 08:00) and sends once daily. If unavailable at that time, it catches up when next available later that day. Changes after a completed daily run take effect the following day. The task must run while the server/database is available; webpage visits alone do not deliver queued reminders. Running without --scheduled is an explicit manual run that bypasses the daily time.
+
+Notifications include new invoices, due-date changes, configurable pre-due reminders, due-day reminders, and repeated overdue reminders. Paid invoices skip reminders. Payment confirmations are queued atomically with verification and sent using the configured channels on the next worker run. Balances use verified payments only. Due-date changes cancel unsent old reminders. Successful queue events are not repeated. Failed sends retry at six-hour intervals up to three attempts. An interrupted in-flight send remains processing for staff review to avoid blind duplicate delivery. Provider acceptance does not guarantee handset delivery.
+
+Use scripts/run_billing.php --queue-only to generate invoices and queue notifications without sending them. This option changes billing records; it is not a dry run. Use tests/billing_automation.php for isolated verification in temporary tables without modifying live records or sending messages.
+
+Deploy all changed PHP files plus the migration scripts; configure private notification credentials on the server. Test with the isolated test before enabling automation.
