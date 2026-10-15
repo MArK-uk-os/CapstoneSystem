@@ -4,7 +4,7 @@
 - Due date is: Ang due date na nakalagay sa bill ng customer (galing sa Billing record).
 - The counting of days starts on: Ang araw pagkatapos ng due date (day 1).
 - After how many days is the account marked "For Disconnection"? 3 araw (day 3).
-- Do Saturdays and Sundays count? Yes (calendar days). To confirm with client.
+- Do Saturdays and Sundays count? Yes (calendar days). [CONFIRM].
 
 ## Rule 2: Account statuses (in order)
 1. Current - means: Hindi pa lampas sa due date ang bill, o bayad na ito.
@@ -16,15 +16,26 @@
 ## Rule 3: Reconnection
 - Reconnection fee: ₱100
 - Does the customer also pay the unpaid balance? Yes. Ang babayaran ay unpaid balance + ₱100.
-- Who records the payment? Ang staff. Ire-record niya ang payment at ang ₱100 fee, tapos i-vi-verify bago ma-mark na Reconnected.
+- Who records the payment? Ang staff. Ire-record niya ang payment at ang ₱100 fee, tapos i-verify bago ma-mark na Reconnected.
 
+## Rule 4: Messages to the customer
 ## Rule 4: Messages to the customer
 - Warning message is sent on day: 1 (via SMS and email)
 - Disconnection message is sent on day: 3 (via SMS and email)
 
-## Questions to ask the client
+Warning message (day 1):
+Cloud Interweb: Hi [name], your bill of PHP[amount] is past due. Please pay by [date] to avoid disconnection.
+
+Disconnection message (day 3):
+Cloud Interweb: [name], your PHP[amount] bill is now 3 days overdue. Your account will be disconnected unless paid. Reconnection fee: PHP100.
+
+Placeholders (the system fills in the real values):
+- [name] = the customer's name
+- [amount] = the unpaid balance
+- [date] = the date the account will be flagged for disconnection (day 3)
+
 ## Client answers
-(Date: __october 15 2026____)  <- isulat ang petsa kung kailan mo sila tinanong
+(Date: __october 15 2026____)  
 1. Staff ang pumuputol ng internet, taga-record lang ang system - [ASSUMED]
 2. Unpaid balance + ₱100 ang babayaran sa reconnection - [ASSUMED]
 3. Weekends count (calendar days) - [CONFIRMED]
@@ -34,4 +45,6 @@
 7. Warning message sa day 1 - [ASSUMED]
 8. Wi-Fi subscribers lang ang sakop - [ASSUMED]
 9. Pareho ang ₱100 reconnection fee sa lahat ng plan - [CONFIRMED]
-- ______
+10. Warning message sa day 1 (ang araw pagkatapos ng due date) - [CONFIRMED]
+11. Nagbayad sa day 2 = balik agad sa Current, walang ₱100 - [CONFIRMED]
+12. Wi-Fi monthly subscribers lang ang sakop - [CONFIRMED] 
