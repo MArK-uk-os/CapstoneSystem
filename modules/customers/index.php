@@ -5,7 +5,7 @@ requireLogin();
 $pdo = getDbConnection();
 $search = trim($_GET['q'] ?? '');
 $serviceId = $_GET['service_id'] ?? '';
-$status = $_GET['status'] ?? '';
+$status = $_GET['status'] ?? 'active';
 $services = $pdo->query('SELECT id, service_name FROM services ORDER BY service_name')->fetchAll();
 $where = [];
 $parameters = [];
@@ -18,11 +18,13 @@ if (ctype_digit($serviceId)) {
     $where[] = 'EXISTS (SELECT 1 FROM customer_services cs2 WHERE cs2.customer_id = c.id AND cs2.service_id = ?)';
     $parameters[] = $serviceId;
 }
-if (in_array($status, ['active', 'inactive'], true)) {
-    $where[] = 'c.status = ?';
-    $parameters[] = $status;
+if (in_array($status, ['active', 'inactive', 'all'], true)) {
+    if ($status !== 'all') {
+        $where[] = 'c.status = ?';
+        $parameters[] = $status;
+    }
 } else {
-    $status = '';
+    $status = 'active';
 }
 $sql = 'SELECT c.*, GROUP_CONCAT(CONCAT(s.service_name, " (", cs.status, ")") ORDER BY s.service_name SEPARATOR ", ") AS service_names
         FROM customers c
@@ -53,7 +55,7 @@ include __DIR__ . '/../../includes/sidebar.php';
 <form method="get" class="row g-2 mb-3">
     <div class="col-md-4"><input type="text" name="q" class="form-control" placeholder="Name, account #, contact, or email" value="<?= htmlspecialchars($search) ?>"></div>
     <div class="col-md-3"><select name="service_id" class="form-select"><option value="">All Services</option><?php foreach ($services as $service): ?><option value="<?= $service['id'] ?>" <?= $serviceId == $service['id'] ? 'selected' : '' ?>><?= htmlspecialchars($service['service_name']) ?></option><?php endforeach; ?></select></div>
-    <div class="col-md-3"><select name="status" class="form-select"><option value="">All Customer Statuses</option><option value="active" <?= $status === 'active' ? 'selected' : '' ?>>Active</option><option value="inactive" <?= $status === 'inactive' ? 'selected' : '' ?>>Inactive</option></select></div>
+    <div class="col-md-3"><select name="status" class="form-select"><option value="active" <?= $status === 'active' ? 'selected' : '' ?>>Active</option><option value="inactive" <?= $status === 'inactive' ? 'selected' : '' ?>>Archived</option><option value="all" <?= $status === 'all' ? 'selected' : '' ?>>All</option></select></div>
     <div class="col-md-2 d-flex gap-2 action-buttons"><button class="btn btn-outline-secondary">Search</button><a class="btn btn-outline-secondary" href="index.php">Clear</a></div>
 </form>
 
@@ -91,6 +93,10 @@ include __DIR__ . '/../../includes/sidebar.php';
                             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
                             <input type="hidden" name="id" value="<?= $c['id'] ?>">
                             <button type="submit" class="btn btn-sm btn-outline-danger">Archive</button>
+                        </form><?php else: ?><form action="restore.php" method="post" class="d-inline" onsubmit="return confirm('Restore this archived customer and reactivate archived services? Catch-up invoices may be generated for periods missed while archived.');">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+                            <input type="hidden" name="id" value="<?= $c['id'] ?>">
+                            <button type="submit" class="btn btn-sm btn-outline-success">Restore</button>
                         </form><?php endif; ?>
                     </td>
                 </tr>

@@ -100,7 +100,7 @@ class BillingAutomation
                 }
             }
             $this->synchronize();
-            foreach ($this->pdo->query("SELECT id,due_date,DATEDIFF(due_date,CURDATE()) days FROM billing WHERE status!='paid'") as $bill) {
+            foreach ($this->pdo->query("SELECT b.id,b.due_date,DATEDIFF(b.due_date,CURDATE()) days FROM billing b JOIN customers c ON c.id=b.customer_id WHERE b.status!='paid' AND c.status='active'") as $bill) {
                 $days=(int)$bill['days'];
                 if ($days>0 && $days<=(int)$settings['pre_due_days']) $this->queueInvoice((int)$bill['id'],'pre_due');
                 elseif ($days===0) $this->queueInvoice((int)$bill['id'],'due');
@@ -112,8 +112,9 @@ class BillingAutomation
                 $paymentFilter = $paymentsOnly ? " AND kind='payment'" : '';
                 $jobs=$this->pdo->query("SELECT * FROM notification_queue WHERE status='pending' AND next_attempt_at<=NOW()" . $paymentFilter . " ORDER BY id")->fetchAll();
                 foreach ($jobs as $job) {
-                    $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.telegram_chat_id,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
+                    $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.telegram_chat_id,c.status customer_status,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
                     $days=(int)(new DateTimeImmutable(date('Y-m-d')))->diff(new DateTimeImmutable($bill['due_date']))->format('%r%a');
+                    if ($job['kind'] !== 'payment' && ($bill['customer_status'] ?? '') !== 'active') { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=?")->execute([$job['id']]); continue; }
                     $expired=($job['kind']==='pre_due' && $days<=0) || ($job['kind']==='due' && $days!==0) || ($job['kind']==='overdue' && $days>=0);
                     if ($job['kind']!=='payment' && ($expired || $bill['due_date']!==$job['due_date'] || ($bill['status']==='paid' && $job['kind']!=='invoice'))) { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=?")->execute([$job['id']]); continue; }
                     // Claim before network I/O: uncertain interrupted sends require staff review rather than duplicate retries.
