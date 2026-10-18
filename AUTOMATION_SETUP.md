@@ -1,5 +1,7 @@
 # Billing automation
 
+Scheduled checks generate due invoices and update overdue balances every minute while automation is enabled. Invoice generation is independent of the daily notification time; adding a service after today's reminder run will not defer its invoice until tomorrow. Billing reminders still send at the configured daily time.
+
 Verified payment confirmations are sent on the next minute-by-minute scheduled check, independently of the daily reminder time, while automation is enabled. Selected SMS/email/Telegram channels apply. Failed payment confirmations retry after six hours, up to three attempts. Invoice and due/overdue reminders retain the configured daily schedule.
 
 Windows quick setup: copy the whole project to XAMPP's htdocs, import the database, start MySQL, and double-click install-notification-task.bat in the project root. Keep scripts/install_notification_task.ps1 with the project. The installer detects the project and PHP paths, checks the database connection without sending messages, and creates or updates the minute-by-minute scheduled task. It runs while the installing Windows user is logged in and the laptop is awake; locking the screen is fine. Set the sending time and channels in Billing Automation settings. Rerun the installer after moving the project. Setup does not import the database or start MySQL automatically.
@@ -19,3 +21,5 @@ Notifications include new invoices, due-date changes, configurable pre-due remin
 Use scripts/run_billing.php --queue-only to generate invoices and queue notifications without sending them. This option changes billing records; it is not a dry run. Use tests/billing_automation.php for isolated verification in temporary tables without modifying live records or sending messages.
 
 Deploy all changed PHP files plus the migration scripts; configure private notification credentials on the server. Test with the isolated test before enabling automation.
+
+Disconnections: run `C:\xampp\php\php.exe database/migrate_disconnections.php` before deploying these changes. Settings contains the unpaid-day threshold (default 2) and default disconnection charge (PHP 100). Collections > Disconnection Monitoring lists eligible services based on verified unpaid balances. Staff records actual disconnection, field worker and optional charge override; status becomes disconnected. Pending fees attach once to the next newly generated manual or automatic invoice, separately itemized. Scheduled plan billing continues while disconnected. Reconnection is explicitly recorded after field restoration; payment does not automatically reconnect a service. Existing invoices are preserved.

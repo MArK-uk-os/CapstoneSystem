@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/notifications/NotificationService.php';
+require_once __DIR__ . '/DisconnectionService.php';
 
 class BillingAutomation
 {
@@ -27,8 +28,16 @@ class BillingAutomation
         try {
             $settings=$this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
             $now=new DateTimeImmutable('now',new DateTimeZone('Asia/Manila'));
-            if(!self::dailyRunDue($settings,$now))return ['waiting_for_daily_time'=>true] + $this->run(true, true);
+            // Invoice creation must not wait for (or miss) the daily reminder run.
+            $queued=$this->run(false);
+            if(isset($queued['busy']) || isset($queued['enabled']))return $queued;
+            if(!self::dailyRunDue($settings,$now)) {
+                $result=$this->run(true, true);
+                $result['generated']=($result['generated']??0)+$queued['generated'];
+                return ['waiting_for_daily_time'=>true] + $result;
+            }
             $result=$this->run();
+            $result['generated']=($result['generated']??0)+$queued['generated'];
             if(!isset($result['busy']) && !isset($result['enabled']))$this->pdo->prepare('UPDATE automation_settings SET last_scheduled_date=? WHERE id=1')->execute([$now->format('Y-m-d')]);
             return $result;
         } finally {$this->pdo->query("SELECT RELEASE_LOCK('cloudinterweb_daily_schedule')");}
@@ -62,7 +71,7 @@ class BillingAutomation
         $generated = 0; $sent = 0; $failed = 0;
         try {
             if (!$paymentsOnly) {
-            $subscriptions = $this->pdo->query("SELECT cs.id FROM customer_services cs JOIN customers c ON c.id=cs.customer_id JOIN services s ON s.id=cs.service_id WHERE cs.status='active' AND c.status='active' AND s.status='active' AND cs.next_billing_date<=CURDATE()")->fetchAll(PDO::FETCH_COLUMN);
+            $subscriptions = $this->pdo->query("SELECT cs.id FROM customer_services cs JOIN customers c ON c.id=cs.customer_id JOIN services s ON s.id=cs.service_id WHERE cs.status IN ('active','disconnected') AND c.status='active' AND s.status='active' AND cs.next_billing_date<=CURDATE()")->fetchAll(PDO::FETCH_COLUMN);
             foreach ($subscriptions as $subscriptionId) {
                 for ($cycle=0; $cycle<24; $cycle++) {
                     $this->pdo->beginTransaction();
@@ -81,7 +90,9 @@ class BillingAutomation
                             $rate=$cs['plan_id']!==null ? $cs['monthly_rate'] : $cs['billing_amount'];
                             $insert=$this->pdo->prepare('INSERT INTO billing (invoice_number,customer_id,customer_service_id,billing_period_start,billing_period_end,due_date,amount,service_name_snapshot,account_number_snapshot) VALUES (?,?,?,?,?,?,?,?,?)');
                             $insert->execute(['INV-'.date('Ymd').'-'.strtoupper(bin2hex(random_bytes(3))),$cs['customer_id'],$cs['id'],$start,$end,$due,round((float)$rate*$factor,2),$cs['plan_name']?:$cs['service_name'],$cs['service_account_number']]);
-                            $this->queueInvoice((int)$this->pdo->lastInsertId()); $generated++;
+                            $invoiceId=(int)$this->pdo->lastInsertId();
+                            (new DisconnectionService($this->pdo))->applyCharges((int)$cs['id'],$invoiceId);
+                            $this->queueInvoice($invoiceId); $generated++;
                         }
                         $this->pdo->prepare('UPDATE customer_services SET next_billing_date=? WHERE id=?')->execute([$next,$cs['id']]);
                         $this->pdo->commit();

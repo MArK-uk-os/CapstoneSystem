@@ -229,6 +229,7 @@ class NotificationService
         $name = $escape($billing['full_name']);
         $summary = $escape($message);
         $details = ['Invoice number' => $billing['invoice_number']];
+        if (!$confirmed && (float)($billing['disconnection_charge']??0)>0) $details['Included disconnection charge'] = 'PHP '.number_format((float)$billing['disconnection_charge'],2);
         if (!empty($billing['account_number'])) $details['Account number'] = $billing['account_number'];
         if (!empty($billing['service_name'])) $details['Service plan'] = $billing['service_name'];
         if (!empty($billing['billing_period_start']) && !empty($billing['billing_period_end'])) {

@@ -1,9 +1,10 @@
 <?php
 require_once __DIR__ . '/../../includes/auth.php';
-requireLogin();
+requireRole('admin', 'staff');
+require_once __DIR__ . '/../../includes/internet_service.php';
 
 $pdo = getDbConnection();
-$services = $pdo->query("SELECT id, service_name, monthly_fee FROM services WHERE status = 'active' ORDER BY service_name")->fetchAll();
+$plans = $pdo->query("SELECT * FROM internet_plans WHERE enabled=1 ORDER BY category,speed_mbps")->fetchAll();
 
 $errors = [];
 $values = [
@@ -11,7 +12,7 @@ $values = [
     'contact_number' => '',
     'email' => '',
     'address' => '',
-    'service_id' => '',
+    'plan_id' => '',
     'status' => 'active',
 ];
 
@@ -24,7 +25,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($values['full_name'] === '') $errors[] = 'Full name is required.';
-        if ($values['email'] !== '' && !filter_var($values['email'], FILTER_VALIDATE_EMAIL)) {
+        if ($values['contact_number'] === '') $errors[] = 'Contact number is required.';
+        if ($values['address'] === '') $errors[] = 'Address is required.';
+        if (!in_array($values['status'], ['active','inactive'], true)) $errors[] = 'Select a valid status.';
+        if (!ctype_digit($values['plan_id']) || !in_array((int)$values['plan_id'], array_map('intval', array_column($plans,'id')), true)) $errors[] = 'Select an available internet plan.';
+        if ($values['email'] === '') $errors[] = 'Email address is required.';
+        elseif (!filter_var($values['email'], FILTER_VALIDATE_EMAIL)) {
             $errors[] = 'Email address is invalid.';
         }
 
@@ -40,13 +46,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $customerId = (int) $pdo->lastInsertId();
                 $accountNumber = 'CUST-' . str_pad((string) $customerId, 6, '0', STR_PAD_LEFT);
                 $pdo->prepare('UPDATE customers SET account_number = ? WHERE id = ?')->execute([$accountNumber, $customerId]);
-                if ($values['service_id'] !== '') {
-                    $service = $pdo->prepare('SELECT monthly_fee FROM services WHERE id = ? AND status = "active"');
-                    $service->execute([$values['service_id']]);
-                    if (!$service = $service->fetch()) throw new RuntimeException('Selected service is unavailable.');
-                    $pdo->prepare('INSERT INTO customer_services (customer_id, service_id, billing_amount, start_date, next_billing_date, status) VALUES (?, ?, ?, CURDATE(), CURDATE(), ?)')->execute([$customerId, $values['service_id'], $service['monthly_fee'], $values['status']]);
+                if ($values['plan_id'] !== '') {
+                    $planQuery = $pdo->prepare('SELECT id,monthly_rate FROM internet_plans WHERE id=? AND enabled=1');
+                    $planQuery->execute([$values['plan_id']]);
+                    $plan = $planQuery->fetch();
+                    if (!$plan) throw new RuntimeException('Select an available internet plan.');
+                    $serviceId = internetServiceId($pdo);
+                    $pdo->prepare('INSERT INTO customer_services (customer_id,service_id,plan_id,billing_amount,start_date,next_billing_date,status) VALUES (?,?,?,?,CURDATE(),CURDATE(),?)')->execute([$customerId,$serviceId,$plan['id'],$plan['monthly_rate'],$values['status']]);
+                    $subscriptionId=(int)$pdo->lastInsertId();
+                    $pdo->prepare('UPDATE customer_services SET service_account_number=? WHERE id=?')->execute(['ACC-'.str_pad((string)$subscriptionId,6,'0',STR_PAD_LEFT),$subscriptionId]);
                 }
-                if ($values['service_id'] !== '') { $subscriptionId=(int)$pdo->lastInsertId(); $pdo->prepare('UPDATE customer_services SET service_account_number=? WHERE id=?')->execute(['ACC-'.str_pad((string)$subscriptionId,6,'0',STR_PAD_LEFT),$subscriptionId]); }
                 $pdo->commit();
             } catch (Throwable $exception) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
@@ -64,7 +73,7 @@ $pageTitle = 'Add Customer';
 include __DIR__ . '/../../includes/header.php';
 include __DIR__ . '/../../includes/sidebar.php';
 ?>
-<h3 class="mb-1">Add Customer</h3><p class="text-muted mb-4">Create a customer account and optionally assign its first service.</p>
+<h3 class="mb-1">Add Customer</h3><p class="text-muted mb-4">All fields are required. Select the customer's first internet plan to complete registration.</p>
 
 <?php if ($errors): ?>
     <div class="alert alert-danger">
@@ -74,7 +83,7 @@ include __DIR__ . '/../../includes/sidebar.php';
     </div>
 <?php endif; ?>
 
-<form method="post" novalidate>
+<form method="post">
     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
     <div class="card mb-3" style="max-width:700px;">
         <div class="card-header bg-white"><strong>Basic Customer Information</strong></div>
@@ -86,34 +95,34 @@ include __DIR__ . '/../../includes/sidebar.php';
                 </div>
                 <div class="col-md-6">
                     <label class="form-label">Contact Number</label>
-                    <input type="text" name="contact_number" class="form-control" value="<?= htmlspecialchars($values['contact_number']) ?>">
+                    <input type="text" name="contact_number" class="form-control" value="<?= htmlspecialchars($values['contact_number']) ?>" required>
                 </div>
                 <div class="col-md-6">
                     <label class="form-label">Email</label>
-                    <input type="email" name="email" class="form-control" value="<?= htmlspecialchars($values['email']) ?>">
+                    <input type="email" name="email" class="form-control" value="<?= htmlspecialchars($values['email']) ?>" required>
                 </div>
                 <div class="col-md-6">
                     <label class="form-label">Status</label>
-                    <select name="status" class="form-select">
+                    <select name="status" class="form-select" required>
                         <option value="active" <?= $values['status'] === 'active' ? 'selected' : '' ?>>Active</option>
                         <option value="inactive" <?= $values['status'] === 'inactive' ? 'selected' : '' ?>>Inactive</option>
                     </select>
                 </div>
                 <div class="col-12">
                     <label class="form-label">Address</label>
-                    <input type="text" name="address" class="form-control" value="<?= htmlspecialchars($values['address']) ?>">
+                    <input type="text" name="address" class="form-control" value="<?= htmlspecialchars($values['address']) ?>" required>
                 </div>
             </div>
         </div>
     </div>
     <div class="card mb-3" style="max-width:700px;">
-        <div class="card-header bg-white"><strong>Services</strong> <small class="text-muted">(optional &mdash; more can be added anytime from the customer profile)</small></div>
+        <div class="card-header bg-white"><strong>Internet Plan</strong> <small class="text-muted">More connections can be added from the customer profile.</small></div>
         <div class="card-body">
-            <label class="form-label">Subscribe to a Service Now</label>
-            <select name="service_id" class="form-select">
-                <option value="">-- Add services later --</option>
-                <?php foreach ($services as $s): ?>
-                <option value="<?= $s['id'] ?>" <?= $values['service_id'] == $s['id'] ? 'selected' : '' ?>><?= htmlspecialchars($s['service_name'] . ' (PHP ' . number_format((float) $s['monthly_fee'], 2) . ')') ?></option>
+            <label class="form-label">Internet Plan</label>
+            <select name="plan_id" class="form-select" required>
+                <option value="">-- Select internet plan --</option>
+                <?php foreach ($plans as $s): ?>
+                <option value="<?= $s['id'] ?>" <?= $values['plan_id'] == $s['id'] ? 'selected' : '' ?>><?= htmlspecialchars($s['name'] . ' - ' . $s['speed_mbps'] . ' Mbps (PHP ' . number_format((float) $s['monthly_rate'], 2) . '/month)') ?></option>
                 <?php endforeach; ?>
             </select>
         </div>
