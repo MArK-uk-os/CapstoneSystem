@@ -76,8 +76,8 @@ include __DIR__ . '/../../includes/sidebar.php';
                 <tr>
                     <td><?= htmlspecialchars($c['account_number']) ?></td>
                     <td><?= htmlspecialchars($c['full_name']) ?></td>
-                    <td><?= htmlspecialchars($c['contact_number']) ?></td>
-                    <td><?= htmlspecialchars($c['email']) ?></td>
+                    <td><?= htmlspecialchars((string) ($c['contact_number'] ?? '')) ?></td>
+                    <td><?= htmlspecialchars((string) ($c['email'] ?? '')) ?></td>
                     <td><?= htmlspecialchars($c['service_names'] ?: '-') ?></td>
                     <td>
                         <span class="badge bg-<?= $c['status'] === 'active' ? 'success' : 'secondary' ?>">
