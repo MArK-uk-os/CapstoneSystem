@@ -17,7 +17,6 @@ $values = [
     'email' => '',
     'address' => '',
     'plan_id' => '',
-    'status' => 'active',
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -33,10 +32,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $values = $validated['values'] + [
             'address' => $values['address'],
             'plan_id' => $values['plan_id'],
-            'status' => $values['status'],
         ];
 
-        if (!in_array($values['status'], ['active','inactive'], true)) $errors[] = 'Select a valid status.';
         if (!ctype_digit($values['plan_id']) || !in_array((int)$values['plan_id'], array_map('intval', array_column($plans,'id')), true)) $errors[] = 'Select an available internet plan.';
 
         if (!$errors) {
@@ -57,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $values['contact_number'],
                     $values['email'],
                     $values['address'],
-                    $values['status'],
+                    'active',
                 ]);
                 $customerId = (int) $pdo->lastInsertId();
                 $accountNumber = 'CUST-' . str_pad((string) $customerId, 6, '0', STR_PAD_LEFT);
@@ -68,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $plan = $planQuery->fetch();
                     if (!$plan) throw new RuntimeException('Select an available internet plan.');
                     $serviceId = internetServiceId($pdo);
-                    $pdo->prepare('INSERT INTO customer_services (customer_id,service_id,plan_id,billing_amount,start_date,next_billing_date,status) VALUES (?,?,?,?,CURDATE(),CURDATE(),?)')->execute([$customerId,$serviceId,$plan['id'],$plan['monthly_rate'],$values['status']]);
+                    $pdo->prepare('INSERT INTO customer_services (customer_id,service_id,plan_id,billing_amount,start_date,next_billing_date,status) VALUES (?,?,?,?,CURDATE(),CURDATE(),?)')->execute([$customerId,$serviceId,$plan['id'],$plan['monthly_rate'],'active']);
                     $subscriptionId=(int)$pdo->lastInsertId();
                     $pdo->prepare('UPDATE customer_services SET service_account_number=? WHERE id=?')->execute(['ACC-'.str_pad((string)$subscriptionId,6,'0',STR_PAD_LEFT),$subscriptionId]);
                 }
@@ -135,13 +132,6 @@ include __DIR__ . '/../../includes/sidebar.php';
                     <label class="form-label">Email</label>
                     <input type="email" name="email" class="form-control" value="<?= htmlspecialchars($values['email']) ?>" required>
                     <div class="form-text">Must be unique.</div>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label">Status</label>
-                    <select name="status" class="form-select" required>
-                        <option value="active" <?= $values['status'] === 'active' ? 'selected' : '' ?>>Active</option>
-                        <option value="inactive" <?= $values['status'] === 'inactive' ? 'selected' : '' ?>>Inactive</option>
-                    </select>
                 </div>
                 <div class="col-12">
                     <label class="form-label">Address</label>
