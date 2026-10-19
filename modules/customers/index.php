@@ -1,7 +1,6 @@
 <?php
 require_once __DIR__ . '/../../includes/auth.php';
 requireLogin();
-require_once __DIR__ . '/../../includes/one_time_services.php';
 
 $pdo = getDbConnection();
 $search = trim($_GET['q'] ?? '');
@@ -17,9 +16,6 @@ if ($search !== '') {
 if ($serviceId === 'internet') {
     $where[] = 'EXISTS (SELECT 1 FROM customer_services cs2 JOIN services s2 ON s2.id = cs2.service_id WHERE cs2.customer_id = c.id AND s2.service_name = ?)';
     $parameters[] = 'Internet';
-} elseif (in_array($serviceId, ONE_TIME_SERVICES, true)) {
-    $where[] = 'EXISTS (SELECT 1 FROM billing b2 WHERE b2.customer_id = c.id AND b2.customer_service_id IS NULL AND b2.service_name_snapshot = ?)';
-    $parameters[] = $serviceId;
 } elseif (ctype_digit($serviceId)) {
     $where[] = 'EXISTS (SELECT 1 FROM customer_services cs2 WHERE cs2.customer_id = c.id AND cs2.service_id = ?)';
     $parameters[] = $serviceId;
@@ -61,7 +57,7 @@ include __DIR__ . '/../../includes/sidebar.php';
 <style>select[name="service_id"] + .chosen-container .chosen-search { display: none; }</style>
 <form method="get" class="row g-2 mb-3">
     <div class="col-md-4"><input type="text" name="q" class="form-control" placeholder="Name, account #, contact, or email" value="<?= htmlspecialchars($search) ?>"></div>
-    <div class="col-md-3"><select name="service_id" class="form-select"><option value="">All Services</option><option value="internet" <?= $serviceId === 'internet' ? 'selected' : '' ?>>Internet (recurring)</option><?php foreach (ONE_TIME_SERVICES as $oneTimeService): ?><option value="<?= htmlspecialchars($oneTimeService) ?>" <?= $serviceId === $oneTimeService ? 'selected' : '' ?>><?= htmlspecialchars($oneTimeService) ?> (one-time)</option><?php endforeach; ?></select></div>
+    <div class="col-md-3"><select name="service_id" class="form-select"><option value="">All Services</option><option value="internet" <?= $serviceId === 'internet' ? 'selected' : '' ?>>Internet (recurring)</option></select></div>
     <div class="col-md-3"><select name="status" class="form-select"><option value="active" <?= $status === 'active' ? 'selected' : '' ?>>Active</option><option value="inactive" <?= $status === 'inactive' ? 'selected' : '' ?>>Archived</option><option value="all" <?= $status === 'all' ? 'selected' : '' ?>>All</option></select></div>
     <div class="col-md-2 d-flex gap-2 action-buttons"><button class="btn btn-outline-secondary">Search</button><a class="btn btn-outline-secondary" href="index.php">Clear</a></div>
 </form>
