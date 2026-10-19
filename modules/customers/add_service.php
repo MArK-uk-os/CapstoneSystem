@@ -17,6 +17,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $planId = (int)($_POST['plan_id'] ?? 0);
         if (!$planId) $errors[]='Select an internet plan.';
         if ($planId) { $plan = $pdo->prepare('SELECT * FROM internet_plans WHERE id=? AND enabled=1'); $plan->execute([$planId]); $plan=$plan->fetch(); if (!$plan) $errors[]='Select an available internet plan.'; else $amount=$plan['monthly_rate']; }
+        if (!$errors && $amount !== 0 && round((float)$amount * ['monthly'=>1,'quarterly'=>3,'annually'=>12][$frequency], 2) > 99999999.99) $errors[]='Plan rate exceeds the maximum invoice amount for the selected billing frequency.';
         if (!$errors) {
             try { $pdo->beginTransaction(); $serviceId=internetServiceId($pdo); $pdo->prepare('INSERT INTO customer_services (customer_id, service_id, billing_amount, billing_frequency, start_date, next_billing_date, due_days, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')->execute([$customerId, $serviceId, $amount, $frequency, $startDate, $nextBillingDate, $dueDays, $serviceStatus]); $subscriptionId=(int)$pdo->lastInsertId(); $pdo->prepare('UPDATE customer_services SET service_account_number=?,plan_id=? WHERE id=?')->execute(['ACC-'.str_pad((string)$subscriptionId,6,'0',STR_PAD_LEFT),$planId?:null,$subscriptionId]); $pdo->commit(); header('Location: view.php?id=' . $customerId . '&msg=' . urlencode('Service added successfully.')); exit; }
             catch (Throwable $exception) { if ($pdo->inTransaction()) $pdo->rollBack(); $errors[] = 'Unable to add the internet service account. Please try again.'; }

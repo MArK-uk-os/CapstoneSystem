@@ -8,6 +8,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && verifyCsrfToken($_POST['csrf_token']?
         $id=$option['id'];
         $name=trim($_POST['name'][$id]??''); $speed=filter_var($_POST['speed'][$id]??'',FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]); $rate=$_POST['rate'][$id]??'';
         if(!$name || strlen($name)>100 || $speed===false || !is_numeric($rate) || (float)$rate<=0 || (float)$rate>99999999) { $notice='All three plans require a name, speed, and positive monthly rate.'; break; }
+        if (round((float)$rate * 12, 2) > 99999999.99) { $notice='Plan rates must not exceed PHP 99,999,999.99 when billed annually (rate × 12).'; break; }
         $plans[]=[$name,$speed,$rate,isset($_POST['enabled'][$id])?1:0,$id];
     }
     if(!$notice) { $pdo->beginTransaction(); try { foreach($plans as $plan)$pdo->prepare('UPDATE internet_plans SET name=?,speed_mbps=?,monthly_rate=?,enabled=? WHERE id=?')->execute($plan); $pdo->commit(); $notice='Plan options saved. Rates apply to future invoices.'; } catch(Throwable $e){$pdo->rollBack();throw $e;} }

@@ -32,7 +32,7 @@ switch ($report) {
         $statusOptions = ['unpaid', 'paid', 'overdue'];
 }
 if (!in_array($status, $statusOptions, true)) $status = '';
-if ($status !== '') { $sql .= ' AND ' . ($report === 'payments' ? 'p.verification_status' : ($report === 'collections' ? 'col.collection_status' : 'b.status')) . ' = ?'; $parameters[] = $status; }
+if ($status !== '') { $sql .= ' AND ' . ($report === 'payments' ? 'p.verification_status' : ($report === 'collections' ? 'col.collection_status' : 'b.status')) . ' = ?'; $parameters[] = $status; } elseif ($report === 'payments') { $sql .= " AND p.verification_status != 'rejected'"; }
 $sql .= ' ORDER BY report_date DESC';
 $stmt = $pdo->prepare($sql); $stmt->execute($parameters); $rows = $stmt->fetchAll();
 
