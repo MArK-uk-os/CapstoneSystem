@@ -40,7 +40,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (!$errors) {
             $customer = $pdo->prepare(
-                 "SELECT cs.id AS customer_service_id, c.id AS customer_id, COALESCE(ip.monthly_rate,cs.billing_amount) * CASE cs.billing_frequency WHEN 'quarterly' THEN 3 WHEN 'annually' THEN 12 ELSE 1 END AS billing_amount
+                 "SELECT cs.id AS customer_service_id, c.id AS customer_id, cs.next_billing_date, COALESCE(ip.monthly_rate,cs.billing_amount) * CASE cs.billing_frequency WHEN 'quarterly' THEN 3 WHEN 'annually' THEN 12 ELSE 1 END AS billing_amount
                   FROM customer_services cs JOIN customers c ON c.id = cs.customer_id JOIN services s ON s.id = cs.service_id LEFT JOIN internet_plans ip ON ip.id=cs.plan_id
                   WHERE cs.id = ? AND c.status = 'active' AND cs.status IN ('active','disconnected') AND s.status = 'active'"
             );
@@ -88,6 +88,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             $invoiceId=(int)$pdo->lastInsertId();
             $pdo->prepare('UPDATE billing b JOIN customer_services cs ON cs.id=b.customer_service_id JOIN services s ON s.id=cs.service_id LEFT JOIN internet_plans ip ON ip.id=cs.plan_id SET b.service_name_snapshot=COALESCE(ip.name,s.service_name),b.account_number_snapshot=cs.service_account_number WHERE b.id=?')->execute([$invoiceId]);
+            $currentNext=$customer['next_billing_date'];
+            if ($currentNext === null || ($values['billing_period_start'] <= $currentNext && $currentNext <= $values['billing_period_end'])) {
+                $nextBilling=(new DateTimeImmutable($values['billing_period_end']))->modify('+1 day')->format('Y-m-d');
+                $pdo->prepare('UPDATE customer_services SET next_billing_date=? WHERE id=?')->execute([$nextBilling,$customer['customer_service_id']]);
+            }
             require_once __DIR__.'/../../includes/BillingAutomation.php';
             (new DisconnectionService($pdo))->applyCharges((int)$customer['customer_service_id'],$invoiceId);
             (new BillingAutomation($pdo))->queueInvoice($invoiceId);
