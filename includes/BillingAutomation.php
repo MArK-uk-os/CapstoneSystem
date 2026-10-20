@@ -79,6 +79,48 @@ class BillingAutomation
         }
     }
 
+    private function queueOverdue(int $id,int $overdueDays,int $repeatDays): void
+    {
+        $settings=$this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
+        if (!$settings['enabled']) return;
+        $repeatDays=max(1,$repeatDays);
+        $stmt=$this->pdo->prepare('SELECT due_date FROM billing WHERE id=?');$stmt->execute([$id]);
+        $due=$stmt->fetchColumn();
+        if ($due===false) return;
+        $bucket=(string)intdiv(-$overdueDays-1,$repeatDays);
+        foreach (explode(',',$settings['channels']) as $channel) {
+            if (!in_array($channel,['telegram','sms','email'],true)) continue;
+            $recent=$this->pdo->prepare("SELECT id FROM notifications WHERE billing_id=? AND type='overdue' AND channel=? AND status IN ('processing','sent','delivered') AND sent_at>DATE_SUB(NOW(),INTERVAL $repeatDays DAY) LIMIT 1");
+            $recent->execute([$id,$channel]);
+            if ($recent->fetchColumn()) {
+                $this->cancelPendingOverdue($id,$channel,'Previous overdue notice sent within the repeat interval.');
+                continue;
+            }
+            $active=$this->pdo->prepare("SELECT id,status FROM notification_queue WHERE billing_id=? AND channel=? AND kind='overdue' AND status IN ('pending','processing') ORDER BY id DESC");
+            $active->execute([$id,$channel]);
+            $jobs=$active->fetchAll();
+            if ($jobs) {
+                $processing=false;
+                foreach ($jobs as $job) if ($job['status']==='processing') {$processing=true;break;}
+                if ($processing) {
+                    $this->cancelPendingOverdue($id,$channel,'Superseded by an in-flight overdue notification.');
+                } else {
+                    $cancel=$this->pdo->prepare("UPDATE notification_queue SET status='cancelled',failure_class=NULL,last_error='Superseded by a newer overdue interval.',next_attempt_at=NOW(),lease_expires_at=NULL WHERE billing_id=? AND channel=? AND kind='overdue' AND status='pending' AND id<>?");
+                    $cancel->execute([$id,$channel,(int)$jobs[0]['id']]);
+                }
+                continue;
+            }
+            $key=implode(':',[$id,'overdue',$due,$repeatDays.':'.$bucket,$channel]);
+            $this->pdo->prepare('INSERT IGNORE INTO notification_queue (event_key,billing_id,kind,channel,due_date) VALUES (?,?,?,?,?)')->execute([$key,$id,'overdue',$channel,$due]);
+        }
+    }
+
+    private function cancelPendingOverdue(int $id,string $channel,string $message): void
+    {
+        $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='cancelled',failure_class=NULL,last_error=?,next_attempt_at=NOW(),lease_expires_at=NULL WHERE billing_id=? AND channel=? AND kind='overdue' AND status='pending'");
+        $stmt->execute([$message,$id,$channel]);
+    }
+
     public function run(bool $deliver = true, bool $paymentsOnly = false, ?DateTimeImmutable $now=null): array
     {
         $settings = $this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
@@ -122,7 +164,7 @@ class BillingAutomation
                 $days=(int)$bill['days'];
                 if ($days>0 && $days<=(int)$settings['pre_due_days']) $this->queueInvoice((int)$bill['id'],'pre_due');
                 elseif ($days===0) $this->queueInvoice((int)$bill['id'],'due');
-                elseif ($days<0) $this->queueInvoice((int)$bill['id'],'overdue',(string)intdiv(-$days-1,max(1,(int)$settings['overdue_repeat_days'])));
+                elseif ($days<0) $this->queueOverdue((int)$bill['id'],$days,max(1,(int)$settings['overdue_repeat_days']));
             }
             }
             if ($deliver) {
