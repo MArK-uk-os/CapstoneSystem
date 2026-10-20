@@ -4,8 +4,8 @@ require_once __DIR__ . '/DisconnectionService.php';
 
 class BillingAutomation
 {
-    private const DELIVERY_START = '08:00:00';
-    private const DELIVERY_END = '20:00:00';
+    private const DEFAULT_DELIVERY_START = '08:00:00';
+    private const DEFAULT_DELIVERY_END = '20:00:00';
     private const MAX_JOBS_PER_RUN = 50;
     private const STALE_PROCESSING_MINUTES = 15;
     private const MAX_ATTEMPTS = 3;
@@ -22,11 +22,32 @@ class BillingAutomation
         return $target->setDate((int) $target->format('Y'), (int) $target->format('m'), $day)->format('Y-m-d');
     }
 
-    public static function withinDeliveryWindow(?DateTimeImmutable $now=null): bool
+    public static function isValidDeliveryTime(string $time): bool
     {
-        $now=($now??new DateTimeImmutable('now',new DateTimeZone('Asia/Manila')))->setTimezone(new DateTimeZone('Asia/Manila'));
-        $time=$now->format('H:i:s');
-        return $time>=self::DELIVERY_START && $time<self::DELIVERY_END;
+        return preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d$/',$time)===1;
+    }
+
+    public static function isValidDeliveryWindow(string $start,string $end): bool
+    {
+        return self::isValidDeliveryTime($start) && self::isValidDeliveryTime($end) && $start!==$end;
+    }
+
+    public static function withinDeliveryWindow(?DateTimeImmutable $now=null,?string $start=null,?string $end=null): bool
+    {
+        $tz=new DateTimeZone('Asia/Manila');
+        $now=($now??new DateTimeImmutable('now',$tz))->setTimezone($tz);
+        $start=self::timeToSeconds($start ?: self::DEFAULT_DELIVERY_START);
+        $end=self::timeToSeconds($end ?: self::DEFAULT_DELIVERY_END);
+        $current=(int)$now->format('G')*3600+(int)$now->format('i')*60+(int)$now->format('s');
+        if ($start===$end) return true;
+        if ($start<$end) return $current>=$start && $current<$end;
+        return $current>=$start || $current<$end;
+    }
+
+    private static function timeToSeconds(string $time): int
+    {
+        $parts=array_map('intval',explode(':',$time));
+        return ($parts[0]??0)*3600+($parts[1]??0)*60+($parts[2]??0);
     }
 
     public function runScheduled(?DateTimeImmutable $now=null): array
@@ -105,7 +126,7 @@ class BillingAutomation
             }
             if ($deliver) {
                 $this->failStaleProcessing();
-                if (!self::withinDeliveryWindow($now)) return ['waiting_for_delivery_window'=>true,'generated'=>$generated,'sent'=>0,'failed'=>0];
+                if (!self::withinDeliveryWindow($now,$settings['delivery_window_start']??null,$settings['delivery_window_end']??null)) return ['waiting_for_delivery_window'=>true,'generated'=>$generated,'sent'=>0,'failed'=>0];
                 $notifier=$this->notifier??new NotificationService($this->pdo);
                 $channels=array_values(array_filter(array_map('trim',explode(',',(string)$settings['channels']))));
                 $paymentFilter = $paymentsOnly ? " AND kind='payment'" : '';

@@ -26,7 +26,7 @@ foreach(['customers','services','customer_services','billing','payments','collec
     $pdo->exec("ALTER TABLE `test_$table` RENAME TO `$table`");
 }
 $pdo->exec("INSERT INTO customers (id,account_number,full_name,email,contact_number,status) VALUES (1,'CUST-TEST','Delivery Test','test@example.com','09170000000','active')");
-$pdo->exec("INSERT INTO automation_settings (id,enabled,channels,pre_due_days,overdue_repeat_days,follow_up_days,send_time) VALUES (1,1,'email,sms',3,1,1,'15:20:00')");
+$pdo->exec("INSERT INTO automation_settings (id,enabled,channels,pre_due_days,overdue_repeat_days,follow_up_days,send_time,delivery_window_start,delivery_window_end) VALUES (1,1,'email,sms',3,1,1,'15:20:00','09:00:00','17:00:00')");
 $pdo->exec("INSERT INTO billing (id,invoice_number,customer_id,billing_period_start,billing_period_end,due_date,amount,status) VALUES (1,'INV-TEST-1',1,CURDATE(),CURDATE(),DATE_ADD(CURDATE(),INTERVAL 30 DAY),100,'unpaid')");
 function addJob(PDO $pdo,string $kind,string $channel,string $status='pending',int $attempts=0,?string $next=null):int
 {
@@ -122,4 +122,4 @@ $paymentJobs=(int)$pdo->query("SELECT COUNT(*) FROM notification_queue WHERE kin
 check($paymentJobs===2,'Verified payment confirmations must be delivered in-window');
 check(in_array('payment:email',$fake->calls,true)&&in_array('payment:sms',$fake->calls,true),'Payment confirmations must use enabled channels');
 
-echo "PASS: quiet hours, enabled channels, deduplication, retry backoff, permanent/ambiguous failures, stale recovery, and payment timing. No messages sent.\n";
+echo "PASS: configurable quiet hours, enabled channels, deduplication, retry backoff, permanent/ambiguous failures, stale recovery, and payment timing. No messages sent.\n";
