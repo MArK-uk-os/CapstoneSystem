@@ -7,6 +7,7 @@ class NotificationService
     private string $deliveryError = '';
     private bool $deliveryRetryable = false;
     private bool $deliveryAmbiguous = false;
+    private string $deliveryFailureClass = 'pre_send';
 
     public function __construct(PDO $pdo)
     {
@@ -14,20 +15,48 @@ class NotificationService
         $this->config = require __DIR__ . '/../../config/notifications.php';
     }
 
-    private function fail(string $message, bool $retryable = false, bool $ambiguous = false): bool
+    private function fail(string $message, bool $retryable = false, bool $ambiguous = false, string $failureClass = 'pre_send'): bool
     {
         $this->deliveryError = $message;
         $this->deliveryRetryable = $retryable;
         $this->deliveryAmbiguous = $ambiguous;
+        $this->deliveryFailureClass = $failureClass;
         return false;
+    }
+
+    public static function curlFailureKind(int $errno): array
+    {
+        if (in_array($errno, [6, 7, 35], true)) return ['retryable' => true, 'ambiguous' => false];
+        return ['retryable' => false, 'ambiguous' => true];
+    }
+
+    public static function httpFailureKind(int $statusCode): array
+    {
+        if ($statusCode === 429) return ['retryable' => true, 'ambiguous' => false];
+        if ($statusCode === 408 || $statusCode >= 500) return ['retryable' => false, 'ambiguous' => true];
+        return ['retryable' => false, 'ambiguous' => false];
     }
 
     private function curlFailure(int $errno, string $error, string $label): bool
     {
         $error = $error !== '' ? $error : 'network error';
-        if ($errno === 28) return $this->fail($label . ' timed out; delivery outcome unknown.', false, true);
-        if (in_array($errno, [6, 7, 35, 52, 56], true)) return $this->fail($label . ' connection failed: ' . $error, true, false);
-        return $this->fail($label . ' request failed: ' . $error, false, true);
+        $kind = self::curlFailureKind($errno);
+        if ($errno === 28) {
+            $message = $label . ' timed out; delivery outcome unknown.';
+        } elseif ($kind['ambiguous']) {
+            $message = $label . ' failed after transmission may have started: ' . $error . '; delivery outcome unknown.';
+        } else {
+            $message = $label . ' connection failed: ' . $error;
+        }
+        return $this->fail($message, $kind['retryable'], $kind['ambiguous'], $kind['ambiguous'] ? 'post_send_unknown' : 'pre_send');
+    }
+
+    private function failHttp(int $statusCode, string $label): bool
+    {
+        $kind = self::httpFailureKind($statusCode);
+        if ($kind['ambiguous']) return $this->fail($label . ' HTTP ' . $statusCode . '; delivery outcome unknown.', false, true, 'post_send_unknown');
+        if ($kind['retryable']) return $this->fail($label . ' HTTP ' . $statusCode . '; transient failure.', true, false);
+        return $this->fail($label . ' rejected the message (HTTP ' . $statusCode . ').', false, false, 'provider_rejected');
     }
 
     public function sendBillingNotification(array $billing, string $channel, bool $log = true): array
@@ -87,8 +116,9 @@ class NotificationService
         $this->deliveryError = '';
         $this->deliveryRetryable = false;
         $this->deliveryAmbiguous = false;
+        $this->deliveryFailureClass = 'pre_send';
         if (!in_array($channel, ['sms', 'email', 'telegram'], true)) {
-            return ['success' => false, 'message' => 'Invalid notification channel.', 'retryable' => false, 'ambiguous' => false];
+            return ['success' => false, 'message' => 'Invalid notification channel.', 'retryable' => false, 'ambiguous' => false, 'failure_class' => 'pre_send'];
         }
 
         try {
@@ -96,7 +126,7 @@ class NotificationService
                 $lookup = $this->pdo->prepare('SELECT telegram_chat_id FROM customers WHERE id = ?');
                 $lookup->execute([$billing['customer_id']]);
                 $chatId = $lookup->fetchColumn();
-                if (!$chatId) return ['success' => false, 'message' => 'Link a Telegram chat ID in Edit Customer first.', 'retryable' => false, 'ambiguous' => false];
+                if (!$chatId) return ['success' => false, 'message' => 'Link a Telegram chat ID in Edit Customer first.', 'retryable' => false, 'ambiguous' => false, 'failure_class' => 'pre_send'];
                 $sent = $this->sendTelegram((string) $chatId, $subject . "\n\n" . $message);
             } else {
             $sent = $channel === 'sms'
@@ -105,7 +135,7 @@ class NotificationService
             }
         } catch (Throwable $exception) {
             $sent = false;
-            if ($this->deliveryError === '') $this->fail('Unexpected provider error: ' . $exception->getMessage(), false, true);
+            if ($this->deliveryError === '') $this->fail('Unexpected provider error: ' . $exception->getMessage(), false, true, 'post_send_unknown');
         }
 
         if ($log) {
@@ -122,6 +152,7 @@ class NotificationService
             'message' => $sent ? $successMessage : $failureMessage,
             'retryable' => $sent ? false : $this->deliveryRetryable,
             'ambiguous' => $sent ? false : $this->deliveryAmbiguous,
+            'failure_class' => $sent ? null : $this->deliveryFailureClass,
         ];
     }
 
@@ -161,8 +192,7 @@ class NotificationService
         $accepted = $statusCode >= 200 && $statusCode < 300 && !empty($response[0]['message_id'])
             && in_array(strtolower($response[0]['status'] ?? ''), ['queued','pending','sent'], true);
         if ($accepted) return true;
-        if ($statusCode === 429 || $statusCode === 408 || $statusCode >= 500) return $this->fail('SMS provider HTTP ' . $statusCode . '; transient failure.', true, false);
-        return $this->fail('SMS provider rejected the message (HTTP ' . $statusCode . ').', false, false);
+        return $this->failHttp($statusCode, 'SMS provider');
     }
 
     private function sendTelegram(string $chatId, string $message): bool
@@ -178,8 +208,7 @@ class NotificationService
         if ($body === false) return $this->curlFailure($errno, $error, 'Telegram');
         $data = json_decode($body ?: '', true);
         if ($code === 200 && ($data['ok'] ?? false) === true) return true;
-        if ($code === 429 || $code === 408 || $code >= 500) return $this->fail('Telegram HTTP ' . $code . '; transient failure.', true, false);
-        return $this->fail('Telegram rejected the message (HTTP ' . $code . ').', false, false);
+        return $this->failHttp($code, 'Telegram');
     }
 
     public static function normalizeSmsNumber(string $number): ?string
@@ -227,8 +256,10 @@ class NotificationService
         $reason = $networkError ?: ($data['message'] ?? 'Invalid response from httpSMS.');
         $message = 'httpSMS (HTTP ' . $code . '): ' . $reason . ($details ? ' ' . implode('; ', $details) : '');
         $message = str_replace($this->config['httpsms_api_key'], '[redacted]', $message);
-        if ($code === 429 || $code === 408 || $code >= 500) return $this->fail($message, true, false);
-        return $this->fail($message, false, false);
+        $kind = self::httpFailureKind($code);
+        if ($kind['ambiguous']) $message .= ' Delivery outcome unknown.';
+        elseif ($kind['retryable']) $message .= ' Transient failure.';
+        return $this->fail($message, $kind['retryable'], $kind['ambiguous'], $kind['ambiguous'] ? 'post_send_unknown' : ($kind['retryable'] ? 'pre_send' : 'provider_rejected'));
     }
 
     private function sendInfobipSms(string $recipient, string $message): bool
@@ -259,13 +290,12 @@ class NotificationService
         $error = curl_error($request);
         curl_close($request);
         if ($body === false) return $this->curlFailure($errno, $error, 'Infobip');
-        if ($statusCode === 429 || $statusCode === 408 || $statusCode >= 500) return $this->fail('Infobip HTTP ' . $statusCode . '; transient failure.', true, false);
-        if ($statusCode < 200 || $statusCode >= 300) return $this->fail('Infobip rejected the message (HTTP ' . $statusCode . ').', false, false);
+        if ($statusCode < 200 || $statusCode >= 300) return $this->failHttp($statusCode, 'Infobip');
         $response = json_decode($body, true);
         $messages = $response['messages'] ?? [];
-        if (count($messages) !== 1) return $this->fail('Infobip returned an unexpected response.', false, true);
+        if (count($messages) !== 1) return $this->fail('Infobip returned an unexpected response.', false, true, 'post_send_unknown');
         if (!empty($messages[0]['messageId']) && in_array((int) ($messages[0]['status']['groupId'] ?? 0), [1, 3], true)) return true;
-        return $this->fail('Infobip did not accept the message.', false, false);
+        return $this->fail('Infobip did not accept the message.', false, false, 'provider_rejected');
     }
 
     public function renderEmail(array $billing, string $type, string $message, array $payment = []): string
@@ -359,9 +389,9 @@ HTML;
                 return $this->fail('Email SMTP connection failed: ' . $error, true, false);
             }
             if (str_contains($lower, 'timed out') || str_contains($lower, 'timeout')) {
-                return $this->fail('Email SMTP timed out; delivery outcome unknown.', false, true);
+                return $this->fail('Email SMTP timed out; delivery outcome unknown.', false, true, 'post_send_unknown');
             }
-            return $this->fail('Email sending failed: ' . $error, false, true);
+            return $this->fail('Email sending failed: ' . $error, false, true, 'post_send_unknown');
         }
     }
 

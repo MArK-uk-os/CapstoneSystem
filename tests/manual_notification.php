@@ -27,11 +27,11 @@ $pdo->exec("INSERT INTO customers (id,account_number,full_name,email,contact_num
 $pdo->exec("INSERT INTO billing (id,invoice_number,customer_id,billing_period_start,billing_period_end,due_date,amount,status) VALUES (1,'INV-MANUAL-1',1,CURDATE(),CURDATE(),DATE_ADD(CURDATE(),INTERVAL 30 DAY),100,'unpaid')");
 $billing=$pdo->query("SELECT b.*,c.full_name,c.email,c.contact_number FROM billing b JOIN customers c ON c.id=b.customer_id WHERE b.id=1")->fetch();
 function resetData(PDO $pdo):void { $pdo->exec('DELETE FROM notification_queue');$pdo->exec('DELETE FROM notifications'); }
-function queueJob(PDO $pdo,string $kind,string $channel):int
+function queueJob(PDO $pdo,string $kind,string $channel,string $status='pending'):int
 {
     static $n=0;$n++;
-    $stmt=$pdo->prepare('INSERT INTO notification_queue(event_key,billing_id,kind,channel,due_date,status,attempts,next_attempt_at) VALUES (?,1,?,?,CURDATE(),"pending",0,NOW())');
-    $stmt->execute(['manual-test-'.$n,$kind,$channel]);
+    $stmt=$pdo->prepare('INSERT INTO notification_queue(event_key,billing_id,kind,channel,due_date,status,attempts,next_attempt_at) VALUES (?,1,?,?,CURDATE(),?,0,NOW())');
+    $stmt->execute(['manual-test-'.$n,$kind,$channel,$status]);
     return (int)$pdo->lastInsertId();
 }
 function queueRow(PDO $pdo,int $id):array { $stmt=$pdo->prepare('SELECT * FROM notification_queue WHERE id=?');$stmt->execute([$id]);return $stmt->fetch(); }
@@ -85,10 +85,20 @@ check(queueRow($pdo,$overdue)['status']==='cancelled','Matching overdue queue jo
 check(queueRow($pdo,$payment)['status']==='pending','Payment confirmation queue job must not be cancelled.');
 check(str_contains((string)notificationRow($pdo,str_repeat('e',32))['error_message'],'Provider timeout'),'Ambiguous manual error must be stored.');
 
+resetData($pdo);
+$inFlight=queueJob($pdo,'invoice','email','processing');
+$fake->mode='success';$fake->calls=[];
+$result=$service->sendBilling($billing,'email',str_repeat('f',32),1);
+check($result['success']===false&&$result['alert']==='warning'&&!empty($result['in_flight']),'Manual send must be blocked while an automatic job is processing.');
+check(str_contains($result['message'],'currently in transit'),'In-flight block must explain the current transit state.');
+check($fake->calls===[],'In-flight block must not contact the provider.');
+check((int)$pdo->query('SELECT COUNT(1) FROM notifications')->fetchColumn()===0,'In-flight block must not create an audit row.');
+check(queueRow($pdo,$inFlight)['status']==='processing','In-flight block must leave the automatic job untouched.');
+
 require_once __DIR__.'/../includes/auth.php';
 flash('warning','Review manual send.');
 $flash=takeFlash();
 check($flash['type']==='warning'&&$flash['message']==='Review manual send.','Flash severity and message must round-trip.');
 check(takeFlash()===null,'Flash must be consumed once.');
 
-echo "PASS: manual idempotency, cooldown, failed retry, queue cancellation, ambiguous handling, error logging, and flash severity. No messages sent.\n";
+echo "PASS: manual idempotency, cooldown, in-flight blocking, failed retry, queue cancellation, ambiguous handling, error logging, and flash severity. No messages sent.\n";

@@ -39,6 +39,12 @@ class ManualNotificationService
                 $this->pdo->rollBack();
                 return $this->result(false, 'Billing record not found.', 'danger');
             }
+            $inFlight = $this->pdo->prepare("SELECT id FROM notification_queue WHERE billing_id=? AND channel=? AND status='processing' LIMIT 1");
+            $inFlight->execute([$billingId, $channel]);
+            if ($inFlight->fetchColumn()) {
+                $this->pdo->rollBack();
+                return $this->result(false, 'Notification currently in transit. Wait for the automatic send to finish before retrying.', 'warning', ['in_flight' => true]);
+            }
             $cooldown = $this->pdo->prepare("SELECT id FROM notifications WHERE billing_id=? AND type=? AND channel=? AND status IN ('processing','sent','delivered') AND sent_at>DATE_SUB(NOW(),INTERVAL " . self::COOLDOWN_SECONDS . " SECOND) LIMIT 1");
             $cooldown->execute([$billingId, $type, $channel]);
             if ($cooldown->fetchColumn()) {

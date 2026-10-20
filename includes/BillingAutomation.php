@@ -7,7 +7,7 @@ class BillingAutomation
     private const DEFAULT_DELIVERY_START = '08:00:00';
     private const DEFAULT_DELIVERY_END = '20:00:00';
     private const MAX_JOBS_PER_RUN = 50;
-    private const STALE_PROCESSING_MINUTES = 15;
+    private const STALE_LEASE_MINUTES = 3;
     private const MAX_ATTEMPTS = 3;
     private const RETRY_MINUTES = [1 => 5, 2 => 15];
 
@@ -87,6 +87,7 @@ class BillingAutomation
         $generated = 0; $sent = 0; $failed = 0;
         $now=$now??new DateTimeImmutable('now',new DateTimeZone('Asia/Manila'));
         try {
+            $this->failStaleProcessing();
             if (!$paymentsOnly) {
             $subscriptions = $this->pdo->query("SELECT cs.id FROM customer_services cs JOIN customers c ON c.id=cs.customer_id JOIN services s ON s.id=cs.service_id WHERE cs.status IN ('active','disconnected') AND c.status='active' AND s.status='active' AND cs.next_billing_date<=CURDATE()")->fetchAll(PDO::FETCH_COLUMN);
             foreach ($subscriptions as $subscriptionId) {
@@ -125,41 +126,67 @@ class BillingAutomation
             }
             }
             if ($deliver) {
-                $this->failStaleProcessing();
                 if (!self::withinDeliveryWindow($now,$settings['delivery_window_start']??null,$settings['delivery_window_end']??null)) return ['waiting_for_delivery_window'=>true,'generated'=>$generated,'sent'=>0,'failed'=>0];
                 $notifier=$this->notifier??new NotificationService($this->pdo);
                 $channels=array_values(array_filter(array_map('trim',explode(',',(string)$settings['channels']))));
                 $paymentFilter = $paymentsOnly ? " AND kind='payment'" : '';
                 $jobs=$this->pdo->query("SELECT * FROM notification_queue WHERE status='pending' AND next_attempt_at<=NOW()" . $paymentFilter . " ORDER BY id LIMIT ".self::MAX_JOBS_PER_RUN)->fetchAll();
                 foreach ($jobs as $job) {
-                    if (!in_array($job['channel'],$channels,true)) { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled',last_error='Channel disabled.' WHERE id=?")->execute([$job['id']]); continue; }
-                    $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.telegram_chat_id,c.status customer_status,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
-                    $days=(int)(new DateTimeImmutable(date('Y-m-d')))->diff(new DateTimeImmutable($bill['due_date']))->format('%r%a');
-                    if ($job['kind'] !== 'payment' && ($bill['customer_status'] ?? '') !== 'active') { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=?")->execute([$job['id']]); continue; }
-                    $expired=($job['kind']==='pre_due' && $days<=0) || ($job['kind']==='due' && $days!==0) || ($job['kind']==='overdue' && $days>=0);
-                    if ($job['kind']!=='payment' && ($expired || $bill['due_date']!==$job['due_date'] || ($bill['status']==='paid' && $job['kind']!=='invoice'))) { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=?")->execute([$job['id']]); continue; }
-                    $this->pdo->prepare("UPDATE notification_queue SET status='processing',attempts=attempts+1,next_attempt_at=NOW() WHERE id=?")->execute([$job['id']]);
-                    if ($job['kind']==='payment') {
-                        $query=$this->pdo->prepare("SELECT * FROM payments WHERE id=? AND billing_id=? AND verification_status='verified'");$query->execute([$job['payment_id'],$bill['id']]);$payment=$query->fetch();
-                        $result=$payment ? $notifier->sendPaymentConfirmation($bill,$payment,$job['channel']) : ['success'=>false,'message'=>'Verified payment not found.','retryable'=>false,'ambiguous'=>false];
-                    } else $result=$job['kind']==='overdue' ? $notifier->sendOverdueNotification($bill,max(1,(int)(new DateTimeImmutable($bill['due_date']))->diff(new DateTimeImmutable(date('Y-m-d')))->days),$job['channel']) : $notifier->sendReminder($bill,$job['channel'],$job['kind']);
-                    $attempt=(int)$job['attempts']+1;
-                    if ($result['success']) {
-                        $sent++;
-                        $this->pdo->prepare("UPDATE notification_queue SET status='sent',last_error=NULL,next_attempt_at=NOW() WHERE id=?")->execute([$job['id']]);
-                        continue;
-                    }
-                    $failed++;
-                    $message=(string)($result['message']??'Notification failed.');
-                    $ambiguous=!empty($result['ambiguous']);
-                    $retryable=!empty($result['retryable']);
-                    if ($ambiguous && stripos($message,'Outcome unknown')!==0) $message='Outcome unknown: '.$message.' Review delivery before retrying.';
-                    $message=self::truncateError($message);
-                    if ($ambiguous || !$retryable || $attempt>=self::MAX_ATTEMPTS) {
-                        $this->pdo->prepare("UPDATE notification_queue SET status='failed',last_error=?,next_attempt_at=NOW() WHERE id=?")->execute([$message,$job['id']]);
-                    } else {
-                        $minutes=self::RETRY_MINUTES[$attempt]??15;
-                        $this->pdo->prepare("UPDATE notification_queue SET status='pending',last_error=?,next_attempt_at=DATE_ADD(NOW(),INTERVAL ? MINUTE) WHERE id=?")->execute([$message,$minutes,$job['id']]);
+                    $claimed = false;
+                    $lease = null;
+                    try {
+                        if (!in_array($job['channel'],$channels,true)) {
+                            $this->pdo->prepare("UPDATE notification_queue SET status='cancelled',last_error='Channel disabled.' WHERE id=? AND status='pending'")->execute([$job['id']]);
+                            continue;
+                        }
+                        $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.telegram_chat_id,c.status customer_status,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
+                        if (!$bill) {
+                            $this->pdo->prepare("UPDATE notification_queue SET status='failed',failure_class='pre_send',last_error='Billing record not found.' WHERE id=? AND status='pending'")->execute([$job['id']]);
+                            $failed++;
+                            continue;
+                        }
+                        $days=(int)(new DateTimeImmutable(date('Y-m-d')))->diff(new DateTimeImmutable($bill['due_date']))->format('%r%a');
+                        if ($job['kind'] !== 'payment' && ($bill['customer_status'] ?? '') !== 'active') {
+                            $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=? AND status='pending'")->execute([$job['id']]);
+                            continue;
+                        }
+                        $expired=($job['kind']==='pre_due' && $days<=0) || ($job['kind']==='due' && $days!==0) || ($job['kind']==='overdue' && $days>=0);
+                        if ($job['kind']!=='payment' && ($expired || $bill['due_date']!==$job['due_date'] || ($bill['status']==='paid' && $job['kind']!=='invoice'))) {
+                            $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=? AND status='pending'")->execute([$job['id']]);
+                            continue;
+                        }
+                        $lease=$this->claimJob((int)$job['id']);
+                        if ($lease===null) continue;
+                        $claimed=true;
+                        if ($job['kind']==='payment') {
+                            $query=$this->pdo->prepare("SELECT * FROM payments WHERE id=? AND billing_id=? AND verification_status='verified'");$query->execute([$job['payment_id'],$bill['id']]);$payment=$query->fetch();
+                            $result=$payment ? $notifier->sendPaymentConfirmation($bill,$payment,$job['channel']) : ['success'=>false,'message'=>'Verified payment not found.','retryable'=>false,'ambiguous'=>false,'failure_class'=>'pre_send'];
+                        } else $result=$job['kind']==='overdue' ? $notifier->sendOverdueNotification($bill,max(1,(int)(new DateTimeImmutable($bill['due_date']))->diff(new DateTimeImmutable(date('Y-m-d')))->days),$job['channel']) : $notifier->sendReminder($bill,$job['channel'],$job['kind']);
+                        $attempt=(int)$job['attempts']+1;
+                        if ($result['success']) {
+                            if ($this->markSent((int)$job['id'],$lease)) $sent++;
+                            continue;
+                        }
+                        $failed++;
+                        $message=(string)($result['message']??'Notification failed.');
+                        $ambiguous=!empty($result['ambiguous']);
+                        $retryable=!empty($result['retryable']);
+                        if ($ambiguous && stripos($message,'Outcome unknown')!==0) $message='Outcome unknown: '.$message.' Review delivery before retrying.';
+                        $message=self::truncateError($message);
+                        $failureClass=(string)($result['failure_class']??($ambiguous?'post_send_unknown':($retryable?'pre_send':'provider_rejected')));
+                        if ($ambiguous || !$retryable || $attempt>=self::MAX_ATTEMPTS) {
+                            $this->markFailed((int)$job['id'],$lease,$message,$failureClass);
+                        } else {
+                            $minutes=self::RETRY_MINUTES[$attempt]??15;
+                            $this->scheduleRetry((int)$job['id'],$lease,$message,$minutes);
+                        }
+                    } catch (Throwable $exception) {
+                        if ($claimed && $lease!==null) {
+                            try {
+                                $message=self::truncateError('Outcome unknown: worker exception: '.$exception->getMessage());
+                                if ($this->markFailed((int)$job['id'],$lease,$message,'post_send_unknown')) $failed++;
+                            } catch (Throwable $ignored) {}
+                        }
                     }
                 }
             }
@@ -169,7 +196,39 @@ class BillingAutomation
 
     private function failStaleProcessing(): void
     {
-        $this->pdo->exec("UPDATE notification_queue SET status='failed',last_error='Outcome unknown: previous send was interrupted. Review delivery before retrying.' WHERE status='processing' AND next_attempt_at<DATE_SUB(NOW(),INTERVAL ".self::STALE_PROCESSING_MINUTES." MINUTE)");
+        $this->pdo->exec("UPDATE notification_queue SET status='failed',last_error='Outcome unknown: previous send was interrupted. Review delivery before retrying.',failure_class='stale',lease_expires_at=NULL,next_attempt_at=NOW() WHERE status='processing' AND lease_expires_at IS NOT NULL AND lease_expires_at<NOW()");
+    }
+
+    private function claimJob(int $id): ?string
+    {
+        $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='processing',attempts=attempts+1,processing_started_at=NOW(),lease_expires_at=DATE_ADD(NOW(),INTERVAL ".self::STALE_LEASE_MINUTES." MINUTE),next_attempt_at=NOW() WHERE id=? AND status='pending' AND next_attempt_at<=NOW()");
+        $stmt->execute([$id]);
+        if ($stmt->rowCount()!==1) return null;
+        $stmt=$this->pdo->prepare('SELECT lease_expires_at FROM notification_queue WHERE id=?');
+        $stmt->execute([$id]);
+        $lease=$stmt->fetchColumn();
+        return $lease===false?null:(string)$lease;
+    }
+
+    private function markSent(int $id,string $lease): bool
+    {
+        $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='sent',last_error=NULL,failure_class=NULL,next_attempt_at=NOW(),lease_expires_at=NULL WHERE id=? AND status='processing' AND lease_expires_at=?");
+        $stmt->execute([$id,$lease]);
+        return $stmt->rowCount()===1;
+    }
+
+    private function markFailed(int $id,string $lease,string $message,string $failureClass): bool
+    {
+        $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='failed',last_error=?,failure_class=?,next_attempt_at=NOW(),lease_expires_at=NULL WHERE id=? AND status='processing' AND lease_expires_at=?");
+        $stmt->execute([$message,$failureClass,$id,$lease]);
+        return $stmt->rowCount()===1;
+    }
+
+    private function scheduleRetry(int $id,string $lease,string $message,int $minutes): bool
+    {
+        $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='pending',last_error=?,failure_class='pre_send',next_attempt_at=DATE_ADD(NOW(),INTERVAL ? MINUTE),lease_expires_at=NULL WHERE id=? AND status='processing' AND lease_expires_at=?");
+        $stmt->execute([$message,$minutes,$id,$lease]);
+        return $stmt->rowCount()===1;
     }
 
     private static function truncateError(string $message): string
