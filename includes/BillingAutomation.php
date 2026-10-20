@@ -82,13 +82,13 @@ class BillingAutomation
     public function run(bool $deliver = true, bool $paymentsOnly = false, ?DateTimeImmutable $now=null): array
     {
         $settings = $this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
-        if (!$settings['enabled']) return ['enabled' => false];
         if (!$this->pdo->query("SELECT GET_LOCK('cloudinterweb_billing_automation',0)")->fetchColumn()) return ['busy' => true];
+        $enabled = !empty($settings['enabled']);
         $generated = 0; $sent = 0; $failed = 0;
         $now=$now??new DateTimeImmutable('now',new DateTimeZone('Asia/Manila'));
         try {
             $this->failStaleProcessing();
-            if (!$paymentsOnly) {
+            if ($enabled && !$paymentsOnly) {
             $subscriptions = $this->pdo->query("SELECT cs.id FROM customer_services cs JOIN customers c ON c.id=cs.customer_id JOIN services s ON s.id=cs.service_id WHERE cs.status IN ('active','disconnected') AND c.status='active' AND s.status='active' AND cs.next_billing_date<=CURDATE()")->fetchAll(PDO::FETCH_COLUMN);
             foreach ($subscriptions as $subscriptionId) {
                 for ($cycle=0; $cycle<24; $cycle++) {
@@ -126,11 +126,12 @@ class BillingAutomation
             }
             }
             if ($deliver) {
-                if (!self::withinDeliveryWindow($now,$settings['delivery_window_start']??null,$settings['delivery_window_end']??null)) return ['waiting_for_delivery_window'=>true,'generated'=>$generated,'sent'=>0,'failed'=>0];
+                $inWindow=self::withinDeliveryWindow($now,$settings['delivery_window_start']??null,$settings['delivery_window_end']??null);
+                $transactionalOnly=$paymentsOnly||!$enabled||!$inWindow;
                 $notifier=$this->notifier??new NotificationService($this->pdo);
                 $channels=array_values(array_filter(array_map('trim',explode(',',(string)$settings['channels']))));
-                $paymentFilter = $paymentsOnly ? " AND kind='payment'" : '';
-                $jobs=$this->pdo->query("SELECT * FROM notification_queue WHERE status='pending' AND next_attempt_at<=NOW()" . $paymentFilter . " ORDER BY id LIMIT ".self::MAX_JOBS_PER_RUN)->fetchAll();
+                $jobFilter = $transactionalOnly ? " AND kind='payment'" : '';
+                $jobs=$this->pdo->query("SELECT * FROM notification_queue WHERE status='pending' AND next_attempt_at<=NOW()" . $jobFilter . " ORDER BY id LIMIT ".self::MAX_JOBS_PER_RUN)->fetchAll();
                 foreach ($jobs as $job) {
                     $claimed = false;
                     $lease = null;
@@ -150,14 +151,26 @@ class BillingAutomation
                             $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=? AND status='pending'")->execute([$job['id']]);
                             continue;
                         }
+                        if ($job['kind']!=='payment' && $bill['status']==='paid') {
+                            $this->pdo->prepare("UPDATE notification_queue SET status='cancelled',last_error='Invoice fully paid.' WHERE id=? AND status='pending'")->execute([$job['id']]);
+                            continue;
+                        }
                         $expired=($job['kind']==='pre_due' && $days<=0) || ($job['kind']==='due' && $days!==0) || ($job['kind']==='overdue' && $days>=0);
-                        if ($job['kind']!=='payment' && ($expired || $bill['due_date']!==$job['due_date'] || ($bill['status']==='paid' && $job['kind']!=='invoice'))) {
+                        if ($job['kind']!=='payment' && ($expired || $bill['due_date']!==$job['due_date'])) {
                             $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=? AND status='pending'")->execute([$job['id']]);
                             continue;
                         }
                         $lease=$this->claimJob((int)$job['id']);
                         if ($lease===null) continue;
                         $claimed=true;
+                        if ($job['kind']!=='payment') {
+                            $statusCheck=$this->pdo->prepare('SELECT status FROM billing WHERE id=?');
+                            $statusCheck->execute([$job['billing_id']]);
+                            if ($statusCheck->fetchColumn()==='paid') {
+                                $this->cancelJob((int)$job['id'],$lease,'Invoice fully paid.');
+                                continue;
+                            }
+                        }
                         if ($job['kind']==='payment') {
                             $query=$this->pdo->prepare("SELECT * FROM payments WHERE id=? AND billing_id=? AND verification_status='verified'");$query->execute([$job['payment_id'],$bill['id']]);$payment=$query->fetch();
                             $result=$payment ? $notifier->sendPaymentConfirmation($bill,$payment,$job['channel']) : ['success'=>false,'message'=>'Verified payment not found.','retryable'=>false,'ambiguous'=>false,'failure_class'=>'pre_send'];
@@ -189,8 +202,11 @@ class BillingAutomation
                         }
                     }
                 }
+                if (!$inWindow) return ['waiting_for_delivery_window'=>true,'generated'=>$generated,'sent'=>$sent,'failed'=>$failed] + ($enabled?[]:['enabled'=>false]);
             }
-            return compact('generated','sent','failed');
+            $result=compact('generated','sent','failed');
+            if (!$enabled) $result['enabled']=false;
+            return $result;
         } finally { $this->pdo->query("SELECT RELEASE_LOCK('cloudinterweb_billing_automation')"); }
     }
 
@@ -228,6 +244,13 @@ class BillingAutomation
     {
         $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='pending',last_error=?,failure_class='pre_send',next_attempt_at=DATE_ADD(NOW(),INTERVAL ? MINUTE),lease_expires_at=NULL WHERE id=? AND status='processing' AND lease_expires_at=?");
         $stmt->execute([$message,$minutes,$id,$lease]);
+        return $stmt->rowCount()===1;
+    }
+
+    private function cancelJob(int $id,string $lease,string $message): bool
+    {
+        $stmt=$this->pdo->prepare("UPDATE notification_queue SET status='cancelled',failure_class=NULL,last_error=?,next_attempt_at=NOW(),lease_expires_at=NULL WHERE id=? AND status='processing' AND lease_expires_at=?");
+        $stmt->execute([$message,$id,$lease]);
         return $stmt->rowCount()===1;
     }
 
