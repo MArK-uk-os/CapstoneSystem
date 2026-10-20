@@ -9,6 +9,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && verifyCsrfToken($_POST['csrf_token']??
     $validDate=DateTimeImmutable::createFromFormat('!Y-m-d',$date);
     $plan=null;foreach($plans as $p)if((int)$p['id']===$planId)$plan=$p;
     if(!$plan || !$validDate || $validDate->format('Y-m-d')!==$date || !in_array($frequency,['monthly','quarterly','annually'],true) || $due===false)$error='Select a configured plan and valid billing schedule.';
+    elseif (round((float)$plan['monthly_rate'] * ['monthly'=>1,'quarterly'=>3,'annually'=>12][$frequency], 2) > 99999999.99)$error='Plan rate exceeds the maximum invoice amount for the selected billing frequency.';
     else {
         $pdo->beginTransaction();try {
             $q=$pdo->prepare('SELECT * FROM customer_services WHERE id=? FOR UPDATE');$q->execute([$id]);$old=$q->fetch();

@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../../includes/auth.php';
-requireLogin();
+requireRole('admin','staff');
+require_once __DIR__.'/../../includes/DisconnectionService.php';
 
 $pdo = getDbConnection();
 $customers = $pdo->query(
@@ -8,7 +9,7 @@ $customers = $pdo->query(
      FROM customer_services cs
      JOIN customers c ON c.id = cs.customer_id
      JOIN services s ON s.id = cs.service_id LEFT JOIN internet_plans ip ON ip.id=cs.plan_id
-     WHERE c.status = 'active' AND cs.status = 'active' AND s.status = 'active'
+     WHERE c.status = 'active' AND cs.status IN ('active','disconnected') AND s.status = 'active'
      ORDER BY c.full_name"
 )->fetchAll();
 
@@ -39,9 +40,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (!$errors) {
             $customer = $pdo->prepare(
-                 "SELECT cs.id AS customer_service_id, c.id AS customer_id, COALESCE(ip.monthly_rate,cs.billing_amount) * CASE cs.billing_frequency WHEN 'quarterly' THEN 3 WHEN 'annually' THEN 12 ELSE 1 END AS billing_amount
+                 "SELECT cs.id AS customer_service_id, c.id AS customer_id, cs.next_billing_date, COALESCE(ip.monthly_rate,cs.billing_amount) * CASE cs.billing_frequency WHEN 'quarterly' THEN 3 WHEN 'annually' THEN 12 ELSE 1 END AS billing_amount
                   FROM customer_services cs JOIN customers c ON c.id = cs.customer_id JOIN services s ON s.id = cs.service_id LEFT JOIN internet_plans ip ON ip.id=cs.plan_id
-                  WHERE cs.id = ? AND c.status = 'active' AND cs.status = 'active' AND s.status = 'active'"
+                  WHERE cs.id = ? AND c.status = 'active' AND cs.status IN ('active','disconnected') AND s.status = 'active'"
             );
               $customer->execute([$values['customer_service_id']]);
             $customer = $customer->fetch();
@@ -61,6 +62,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (!$errors) {
+            $pdo->beginTransaction();
+            try {
+            $lock=$pdo->prepare('SELECT id FROM customer_services WHERE id=? FOR UPDATE');$lock->execute([$customer['customer_service_id']]);
+            $overlap=$pdo->prepare('SELECT id FROM billing WHERE customer_service_id=? AND billing_period_start<=? AND billing_period_end>=?');$overlap->execute([$customer['customer_service_id'],$values['billing_period_end'],$values['billing_period_start']]);
+            if($overlap->fetch())throw new RuntimeException('An invoice already covers this billing period.');
             do {
                 $invoiceNumber = 'INV-' . date('Ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
                 $invoiceExists = $pdo->prepare('SELECT id FROM billing WHERE invoice_number = ?');
@@ -82,10 +88,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
             $invoiceId=(int)$pdo->lastInsertId();
             $pdo->prepare('UPDATE billing b JOIN customer_services cs ON cs.id=b.customer_service_id JOIN services s ON s.id=cs.service_id LEFT JOIN internet_plans ip ON ip.id=cs.plan_id SET b.service_name_snapshot=COALESCE(ip.name,s.service_name),b.account_number_snapshot=cs.service_account_number WHERE b.id=?')->execute([$invoiceId]);
+            $currentNext=$customer['next_billing_date'];
+            if ($currentNext === null || ($values['billing_period_start'] <= $currentNext && $currentNext <= $values['billing_period_end'])) {
+                $nextBilling=(new DateTimeImmutable($values['billing_period_end']))->modify('+1 day')->format('Y-m-d');
+                $pdo->prepare('UPDATE customer_services SET next_billing_date=? WHERE id=?')->execute([$nextBilling,$customer['customer_service_id']]);
+            }
             require_once __DIR__.'/../../includes/BillingAutomation.php';
+            (new DisconnectionService($pdo))->applyCharges((int)$customer['customer_service_id'],$invoiceId);
             (new BillingAutomation($pdo))->queueInvoice($invoiceId);
+            $pdo->commit();
             header('Location: invoice.php?id=' . $invoiceId . '&msg=' . urlencode('Billing record created.'));
             exit;
+            } catch(Throwable $e) { if($pdo->inTransaction())$pdo->rollBack();$errors[]=$e->getMessage(); }
         }
     }
 }

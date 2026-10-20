@@ -138,9 +138,14 @@ CREATE TABLE notifications (
     customer_id INT NOT NULL,
     billing_id INT DEFAULT NULL,
     type ENUM('billing','payment_confirmation','overdue') NOT NULL,
-    channel ENUM('sms','email') NOT NULL,
-    status ENUM('sent','delivered','failed') NOT NULL DEFAULT 'sent',
+    channel ENUM('sms','email','telegram') NOT NULL,
+    status ENUM('processing','sent','delivered','failed') NOT NULL DEFAULT 'sent',
+    request_key VARCHAR(64) DEFAULT NULL,
+    requested_by INT DEFAULT NULL,
+    error_message VARCHAR(255) DEFAULT NULL,
     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_notifications_request_key (request_key),
+    KEY idx_notifications_manual_lookup (billing_id, type, channel, status, sent_at),
     CONSTRAINT fk_notifications_customer FOREIGN KEY (customer_id) REFERENCES customers(id),
     CONSTRAINT fk_notifications_billing FOREIGN KEY (billing_id) REFERENCES billing(id)
 ) ENGINE=InnoDB;

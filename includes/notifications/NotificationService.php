@@ -5,6 +5,9 @@ class NotificationService
     private PDO $pdo;
     private array $config;
     private string $deliveryError = '';
+    private bool $deliveryRetryable = false;
+    private bool $deliveryAmbiguous = false;
+    private string $deliveryFailureClass = 'pre_send';
 
     public function __construct(PDO $pdo)
     {
@@ -12,7 +15,51 @@ class NotificationService
         $this->config = require __DIR__ . '/../../config/notifications.php';
     }
 
-    public function sendBillingNotification(array $billing, string $channel): array
+    private function fail(string $message, bool $retryable = false, bool $ambiguous = false, string $failureClass = 'pre_send'): bool
+    {
+        $this->deliveryError = $message;
+        $this->deliveryRetryable = $retryable;
+        $this->deliveryAmbiguous = $ambiguous;
+        $this->deliveryFailureClass = $failureClass;
+        return false;
+    }
+
+    public static function curlFailureKind(int $errno): array
+    {
+        if (in_array($errno, [6, 7, 35], true)) return ['retryable' => true, 'ambiguous' => false];
+        return ['retryable' => false, 'ambiguous' => true];
+    }
+
+    public static function httpFailureKind(int $statusCode): array
+    {
+        if ($statusCode === 429) return ['retryable' => true, 'ambiguous' => false];
+        if ($statusCode === 408 || $statusCode >= 500) return ['retryable' => false, 'ambiguous' => true];
+        return ['retryable' => false, 'ambiguous' => false];
+    }
+
+    private function curlFailure(int $errno, string $error, string $label): bool
+    {
+        $error = $error !== '' ? $error : 'network error';
+        $kind = self::curlFailureKind($errno);
+        if ($errno === 28) {
+            $message = $label . ' timed out; delivery outcome unknown.';
+        } elseif ($kind['ambiguous']) {
+            $message = $label . ' failed after transmission may have started: ' . $error . '; delivery outcome unknown.';
+        } else {
+            $message = $label . ' connection failed: ' . $error;
+        }
+        return $this->fail($message, $kind['retryable'], $kind['ambiguous'], $kind['ambiguous'] ? 'post_send_unknown' : 'pre_send');
+    }
+
+    private function failHttp(int $statusCode, string $label): bool
+    {
+        $kind = self::httpFailureKind($statusCode);
+        if ($kind['ambiguous']) return $this->fail($label . ' HTTP ' . $statusCode . '; delivery outcome unknown.', false, true, 'post_send_unknown');
+        if ($kind['retryable']) return $this->fail($label . ' HTTP ' . $statusCode . '; transient failure.', true, false);
+        return $this->fail($label . ' rejected the message (HTTP ' . $statusCode . ').', false, false, 'provider_rejected');
+    }
+
+    public function sendBillingNotification(array $billing, string $channel, bool $log = true): array
     {
         $message = sprintf(
             'Invoice %s for PHP %s is due on %s. Thank you, Cloud Interweb.',
@@ -21,7 +68,7 @@ class NotificationService
             date('M j, Y', strtotime($billing['due_date']))
         );
 
-        return $this->send($billing, $channel, 'billing', 'Billing Invoice ' . $billing['invoice_number'], $message);
+        return $this->send($billing, $channel, 'billing', 'Billing Invoice ' . $billing['invoice_number'], $message, [], $log);
     }
 
     public function sendPaymentConfirmation(array $billing, array $payment, string $channel): array
@@ -42,7 +89,7 @@ class NotificationService
         return $this->send($billing, $channel, 'payment_confirmation', 'Payment Confirmed - ' . $billing['invoice_number'], $message, $payment);
     }
 
-    public function sendOverdueNotification(array $billing, int $overdueDays, string $channel): array
+    public function sendOverdueNotification(array $billing, int $overdueDays, string $channel, bool $log = true): array
     {
         $billing['amount'] = $billing['outstanding_balance'] ?? $billing['amount'];
         $message = sprintf(
@@ -52,7 +99,7 @@ class NotificationService
             $overdueDays
         );
 
-        return $this->send($billing, $channel, 'overdue', 'Overdue Invoice - ' . $billing['invoice_number'], $message);
+        return $this->send($billing, $channel, 'overdue', 'Overdue Invoice - ' . $billing['invoice_number'], $message, [], $log);
     }
 
     public function sendReminder(array $billing, string $channel, string $kind): array
@@ -64,11 +111,14 @@ class NotificationService
         return $this->send($billing,$channel,'billing',$heading . ' - ' . $billing['invoice_number'],$message);
     }
 
-    private function send(array $billing, string $channel, string $type, string $subject, string $message, array $payment = []): array
+    private function send(array $billing, string $channel, string $type, string $subject, string $message, array $payment = [], bool $log = true): array
     {
         $this->deliveryError = '';
+        $this->deliveryRetryable = false;
+        $this->deliveryAmbiguous = false;
+        $this->deliveryFailureClass = 'pre_send';
         if (!in_array($channel, ['sms', 'email', 'telegram'], true)) {
-            return ['success' => false, 'message' => 'Invalid notification channel.'];
+            return ['success' => false, 'message' => 'Invalid notification channel.', 'retryable' => false, 'ambiguous' => false, 'failure_class' => 'pre_send'];
         }
 
         try {
@@ -76,7 +126,7 @@ class NotificationService
                 $lookup = $this->pdo->prepare('SELECT telegram_chat_id FROM customers WHERE id = ?');
                 $lookup->execute([$billing['customer_id']]);
                 $chatId = $lookup->fetchColumn();
-                if (!$chatId) return ['success' => false, 'message' => 'Link a Telegram chat ID in Edit Customer first.'];
+                if (!$chatId) return ['success' => false, 'message' => 'Link a Telegram chat ID in Edit Customer first.', 'retryable' => false, 'ambiguous' => false, 'failure_class' => 'pre_send'];
                 $sent = $this->sendTelegram((string) $chatId, $subject . "\n\n" . $message);
             } else {
             $sent = $channel === 'sms'
@@ -85,24 +135,37 @@ class NotificationService
             }
         } catch (Throwable $exception) {
             $sent = false;
+            if ($this->deliveryError === '') $this->fail('Unexpected provider error: ' . $exception->getMessage(), false, true, 'post_send_unknown');
         }
 
-        $this->log($billing['customer_id'], $billing['id'], $type, $channel, $sent ? 'sent' : 'failed');
+        if ($log) {
+            $this->log($billing['customer_id'], $billing['id'], $type, $channel, $sent ? 'sent' : 'failed', $sent ? null : ($this->deliveryError ?: 'Notification failed.'));
+        }
+        $successMessage = $channel === 'sms'
+            ? 'SMS accepted by the provider; handset delivery is not confirmed.'
+            : ucfirst($channel) . ' notification sent.';
+        $failureMessage = $this->deliveryAmbiguous
+            ? 'Outcome unknown: ' . ($this->deliveryError ?: 'no provider response.') . ' Review delivery before retrying.'
+            : ($this->deliveryError ?: ucfirst($channel) . ' notification could not be sent. Check recipient and notification settings.');
         return [
             'success' => $sent,
-            'message' => $sent ? ucfirst($channel) . ' notification sent.' : ($this->deliveryError ?: ucfirst($channel) . ' notification could not be sent. Check recipient and notification settings.'),
+            'message' => $sent ? $successMessage : $failureMessage,
+            'retryable' => $sent ? false : $this->deliveryRetryable,
+            'ambiguous' => $sent ? false : $this->deliveryAmbiguous,
+            'failure_class' => $sent ? null : $this->deliveryFailureClass,
         ];
     }
 
     private function sendSms(string $recipient, string $message): bool
     {
+        if ($recipient === '') return $this->fail('No contact number on file.');
         if ($this->config['sms_provider'] === 'httpsms') return $this->sendHttpSms($recipient, $message);
         if ($this->config['sms_provider'] === 'infobip') {
             return $this->sendInfobipSms($recipient, $message);
         }
-        if ($this->config['sms_provider'] !== 'semaphore') return false;
-        if ($recipient === '' || $this->config['semaphore_api_key'] === '' || !function_exists('curl_init')) {
-            return false;
+        if ($this->config['sms_provider'] !== 'semaphore') return $this->fail('SMS provider is not supported.');
+        if ($this->config['semaphore_api_key'] === '' || !function_exists('curl_init')) {
+            return $this->fail('SMS provider is not configured.');
         }
 
         $request = curl_init('https://api.semaphore.co/api/v4/messages');
@@ -115,27 +178,37 @@ class NotificationService
                 'sendername' => $this->config['semaphore_sender_name'],
             ]),
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_TIMEOUT => 15,
         ]);
         $body = curl_exec($request);
         $statusCode = (int) curl_getinfo($request, CURLINFO_RESPONSE_CODE);
+        $errno = curl_errno($request);
+        $error = curl_error($request);
         curl_close($request);
+        if ($body === false) return $this->curlFailure($errno, $error, 'SMS provider');
 
         $response = json_decode($body ?: '', true);
-        return $statusCode >= 200 && $statusCode < 300 && !empty($response[0]['message_id'])
+        $accepted = $statusCode >= 200 && $statusCode < 300 && !empty($response[0]['message_id'])
             && in_array(strtolower($response[0]['status'] ?? ''), ['queued','pending','sent'], true);
+        if ($accepted) return true;
+        return $this->failHttp($statusCode, 'SMS provider');
     }
 
     private function sendTelegram(string $chatId, string $message): bool
     {
-        if ($this->config['telegram_bot_token'] === '' || !function_exists('curl_init')) return false;
+        if ($this->config['telegram_bot_token'] === '' || !function_exists('curl_init')) return $this->fail('Telegram is not configured.');
         $request = curl_init('https://api.telegram.org/bot' . $this->config['telegram_bot_token'] . '/sendMessage');
         curl_setopt_array($request, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query(['chat_id' => $chatId, 'text' => $message]), CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 15]);
         $body = curl_exec($request);
         $code = (int) curl_getinfo($request, CURLINFO_RESPONSE_CODE);
+        $errno = curl_errno($request);
+        $error = curl_error($request);
         curl_close($request);
+        if ($body === false) return $this->curlFailure($errno, $error, 'Telegram');
         $data = json_decode($body ?: '', true);
-        return $code === 200 && ($data['ok'] ?? false) === true;
+        if ($code === 200 && ($data['ok'] ?? false) === true) return true;
+        return $this->failHttp($code, 'Telegram');
     }
 
     public static function normalizeSmsNumber(string $number): ?string
@@ -156,9 +229,9 @@ class NotificationService
     {
         $to = self::normalizeSmsNumber($recipient);
         $from = self::normalizeSmsNumber($this->config['httpsms_from']);
-        if (!$to || !$from || $this->config['httpsms_api_key'] === '' || !function_exists('curl_init')) {
-            $this->deliveryError = 'httpSMS requires valid recipient and sender numbers, an API key, and PHP cURL.';
-            return false;
+        if (!$to) return $this->fail('httpSMS requires a valid recipient number.');
+        if (!$from || $this->config['httpsms_api_key'] === '' || !function_exists('curl_init')) {
+            return $this->fail('httpSMS requires a valid sender number, an API key, and PHP cURL.');
         }
         $request = curl_init('https://api.httpsms.com/v1/messages/send');
         curl_setopt_array($request, [
@@ -169,30 +242,35 @@ class NotificationService
         ]);
         $body = curl_exec($request);
         $code = (int) curl_getinfo($request, CURLINFO_RESPONSE_CODE);
+        $errno = curl_errno($request);
         $networkError = curl_error($request);
         curl_close($request);
+        if ($body === false) return $this->curlFailure($errno, $networkError, 'httpSMS');
         $data = json_decode($body ?: '', true);
         $accepted = is_array($data) && self::httpSmsAccepted($code, $data);
-        if (!$accepted) {
-            $details = [];
-            if (is_array($data['data'] ?? null)) foreach ($data['data'] as $field => $errors) {
-                if (is_array($errors)) foreach ($errors as $error) if (is_string($error)) $details[] = $field . ': ' . $error;
-            }
-            $reason = $networkError ?: ($data['message'] ?? 'Invalid response from httpSMS.');
-            $this->deliveryError = 'httpSMS (HTTP ' . $code . '): ' . $reason . ($details ? ' ' . implode('; ', $details) : '');
-            $this->deliveryError = str_replace($this->config['httpsms_api_key'], '[redacted]', $this->deliveryError);
+        if ($accepted) return true;
+        $details = [];
+        if (is_array($data['data'] ?? null)) foreach ($data['data'] as $field => $errors) {
+            if (is_array($errors)) foreach ($errors as $error) if (is_string($error)) $details[] = $field . ': ' . $error;
         }
-        return $accepted;
+        $reason = $networkError ?: ($data['message'] ?? 'Invalid response from httpSMS.');
+        $message = 'httpSMS (HTTP ' . $code . '): ' . $reason . ($details ? ' ' . implode('; ', $details) : '');
+        $message = str_replace($this->config['httpsms_api_key'], '[redacted]', $message);
+        $kind = self::httpFailureKind($code);
+        if ($kind['ambiguous']) $message .= ' Delivery outcome unknown.';
+        elseif ($kind['retryable']) $message .= ' Transient failure.';
+        return $this->fail($message, $kind['retryable'], $kind['ambiguous'], $kind['ambiguous'] ? 'post_send_unknown' : ($kind['retryable'] ? 'pre_send' : 'provider_rejected'));
     }
 
     private function sendInfobipSms(string $recipient, string $message): bool
     {
         $number = preg_replace('/[\s()+-]/', '', $recipient);
         if (preg_match('/^09\d{9}$/', $number)) $number = '63' . substr($number, 1);
-        if (!preg_match('/^[1-9]\d{7,14}$/', $number) || !function_exists('curl_init')) return false;
+        if (!preg_match('/^[1-9]\d{7,14}$/', $number)) return $this->fail('Infobip requires a valid recipient number.');
+        if (!function_exists('curl_init')) return $this->fail('Infobip requires PHP cURL.');
         $baseUrl = rtrim($this->config['infobip_base_url'], '/');
         if (!preg_match('~^https://[a-z0-9-]+\.api\.infobip\.com$~i', $baseUrl)
-            || $this->config['infobip_api_key'] === '' || $this->config['infobip_sender'] === '') return false;
+            || $this->config['infobip_api_key'] === '' || $this->config['infobip_sender'] === '') return $this->fail('Infobip is not configured.');
         $request = curl_init($baseUrl . '/sms/3/messages');
         curl_setopt_array($request, [
             CURLOPT_POST => true,
@@ -208,13 +286,16 @@ class NotificationService
         ]);
         $body = curl_exec($request);
         $statusCode = (int) curl_getinfo($request, CURLINFO_RESPONSE_CODE);
+        $errno = curl_errno($request);
+        $error = curl_error($request);
         curl_close($request);
-        if ($body === false || $statusCode < 200 || $statusCode >= 300) return false;
+        if ($body === false) return $this->curlFailure($errno, $error, 'Infobip');
+        if ($statusCode < 200 || $statusCode >= 300) return $this->failHttp($statusCode, 'Infobip');
         $response = json_decode($body, true);
         $messages = $response['messages'] ?? [];
-        if (count($messages) !== 1) return false;
-        // Accepted/pending is not confirmation of delivery to the handset.
-        return !empty($messages[0]['messageId']) && in_array((int) ($messages[0]['status']['groupId'] ?? 0), [1, 3], true);
+        if (count($messages) !== 1) return $this->fail('Infobip returned an unexpected response.', false, true, 'post_send_unknown');
+        if (!empty($messages[0]['messageId']) && in_array((int) ($messages[0]['status']['groupId'] ?? 0), [1, 3], true)) return true;
+        return $this->fail('Infobip did not accept the message.', false, false, 'provider_rejected');
     }
 
     public function renderEmail(array $billing, string $type, string $message, array $payment = []): string
@@ -229,6 +310,7 @@ class NotificationService
         $name = $escape($billing['full_name']);
         $summary = $escape($message);
         $details = ['Invoice number' => $billing['invoice_number']];
+        if (!$confirmed && (float)($billing['disconnection_charge']??0)>0) $details['Included disconnection charge'] = 'PHP '.number_format((float)$billing['disconnection_charge'],2);
         if (!empty($billing['account_number'])) $details['Account number'] = $billing['account_number'];
         if (!empty($billing['service_name'])) $details['Service plan'] = $billing['service_name'];
         if (!empty($billing['billing_period_start']) && !empty($billing['billing_period_end'])) {
@@ -265,17 +347,19 @@ HTML;
     private function sendEmail(string $recipient, string $name, string $subject, string $message, string $html): bool
     {
         $autoload = __DIR__ . '/../../vendor/autoload.php';
-        if ($recipient === '' || $this->config['smtp_host'] === '' || !is_file($autoload)) {
-            return false;
+        if ($recipient === '') return $this->fail('No email address on file.');
+        if ($this->config['smtp_host'] === '' || !is_file($autoload)) {
+            return $this->fail('Email is not configured.');
         }
 
         require_once $autoload;
         if (!class_exists('PHPMailer\\PHPMailer\\PHPMailer')) {
-            return false;
+            return $this->fail('Email library is unavailable.');
         }
 
         $mail = new PHPMailer\PHPMailer\PHPMailer(true);
         $mail->CharSet = 'UTF-8';
+        $mail->Timeout = 20;
         $mail->isSMTP();
         $mail->Host = $this->config['smtp_host'];
         $mail->Port = $this->config['smtp_port'];
@@ -290,14 +374,32 @@ HTML;
         $mail->Body = $html;
         $mail->AltBody = $message;
 
-        return $mail->send();
+        try {
+            return $mail->send();
+        } catch (Throwable $exception) {
+            $error = $exception->getMessage();
+            $lower = strtolower($error);
+            if (str_contains($lower, 'invalid address') || str_contains($lower, 'could not authenticate')
+                || str_contains($lower, 'username and password not accepted') || str_contains($lower, 'data not accepted')
+                || str_contains($lower, 'recipient address rejected') || str_contains($lower, 'message body empty')) {
+                return $this->fail('Email: ' . $error, false, false);
+            }
+            if (str_contains($lower, 'connect() failed') || str_contains($lower, 'could not connect')
+                || str_contains($lower, 'connection refused') || str_contains($lower, 'network is unreachable')) {
+                return $this->fail('Email SMTP connection failed: ' . $error, true, false);
+            }
+            if (str_contains($lower, 'timed out') || str_contains($lower, 'timeout')) {
+                return $this->fail('Email SMTP timed out; delivery outcome unknown.', false, true, 'post_send_unknown');
+            }
+            return $this->fail('Email sending failed: ' . $error, false, true, 'post_send_unknown');
+        }
     }
 
-    private function log(int $customerId, int $billingId, string $type, string $channel, string $status): void
+    private function log(int $customerId, int $billingId, string $type, string $channel, string $status, ?string $error = null): void
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO notifications (customer_id, billing_id, type, channel, status) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO notifications (customer_id, billing_id, type, channel, status, error_message) VALUES (?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$customerId, $billingId, $type, $channel, $status]);
+        $stmt->execute([$customerId, $billingId, $type, $channel, $status, $error === null ? null : substr($error, 0, 255)]);
     }
 }

@@ -44,11 +44,11 @@ try {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Checks every minute; sends at the Philippine time configured in Billing Automation settings.' -Force | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Checks every minute; delivers during the configured delivery window.' -Force | Out-Null
 
     Write-Host ''
     Write-Host 'Notification scheduled task installed successfully.' -ForegroundColor Green
-    Write-Host 'It checks every minute and respects the sending time in Billing Automation settings.'
+    Write-Host 'It checks every minute and delivers during the configured delivery window.'
     Write-Host 'Keep MySQL running, internet connected, and this Windows user logged in (locking the screen is fine).'
     Write-Host 'The laptop must be awake. SMS also requires the configured Android phone to be online.'
     Write-Host 'If you move the project again, rerun this batch file to update the task paths.'
