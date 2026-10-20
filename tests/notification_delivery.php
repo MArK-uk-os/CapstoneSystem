@@ -17,7 +17,7 @@ class FakeNotifier extends NotificationService
         return ['success'=>false,'message'=>'Provider timeout.','retryable'=>false,'ambiguous'=>true];
     }
     public function sendReminder(array $billing,string $channel,string $kind):array { return $this->result($channel,$kind); }
-    public function sendOverdueNotification(array $billing,int $overdueDays,string $channel):array { return $this->result($channel,'overdue'); }
+    public function sendOverdueNotification(array $billing,int $overdueDays,string $channel,bool $log=true):array { return $this->result($channel,'overdue'); }
     public function sendPaymentConfirmation(array $billing,array $payment,string $channel):array { return $this->result($channel,'payment'); }
 }
 $pdo=getDbConnection();

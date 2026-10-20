@@ -30,7 +30,7 @@ class NotificationService
         return $this->fail($label . ' request failed: ' . $error, false, true);
     }
 
-    public function sendBillingNotification(array $billing, string $channel): array
+    public function sendBillingNotification(array $billing, string $channel, bool $log = true): array
     {
         $message = sprintf(
             'Invoice %s for PHP %s is due on %s. Thank you, Cloud Interweb.',
@@ -39,7 +39,7 @@ class NotificationService
             date('M j, Y', strtotime($billing['due_date']))
         );
 
-        return $this->send($billing, $channel, 'billing', 'Billing Invoice ' . $billing['invoice_number'], $message);
+        return $this->send($billing, $channel, 'billing', 'Billing Invoice ' . $billing['invoice_number'], $message, [], $log);
     }
 
     public function sendPaymentConfirmation(array $billing, array $payment, string $channel): array
@@ -60,7 +60,7 @@ class NotificationService
         return $this->send($billing, $channel, 'payment_confirmation', 'Payment Confirmed - ' . $billing['invoice_number'], $message, $payment);
     }
 
-    public function sendOverdueNotification(array $billing, int $overdueDays, string $channel): array
+    public function sendOverdueNotification(array $billing, int $overdueDays, string $channel, bool $log = true): array
     {
         $billing['amount'] = $billing['outstanding_balance'] ?? $billing['amount'];
         $message = sprintf(
@@ -70,7 +70,7 @@ class NotificationService
             $overdueDays
         );
 
-        return $this->send($billing, $channel, 'overdue', 'Overdue Invoice - ' . $billing['invoice_number'], $message);
+        return $this->send($billing, $channel, 'overdue', 'Overdue Invoice - ' . $billing['invoice_number'], $message, [], $log);
     }
 
     public function sendReminder(array $billing, string $channel, string $kind): array
@@ -82,7 +82,7 @@ class NotificationService
         return $this->send($billing,$channel,'billing',$heading . ' - ' . $billing['invoice_number'],$message);
     }
 
-    private function send(array $billing, string $channel, string $type, string $subject, string $message, array $payment = []): array
+    private function send(array $billing, string $channel, string $type, string $subject, string $message, array $payment = [], bool $log = true): array
     {
         $this->deliveryError = '';
         $this->deliveryRetryable = false;
@@ -108,7 +108,9 @@ class NotificationService
             if ($this->deliveryError === '') $this->fail('Unexpected provider error: ' . $exception->getMessage(), false, true);
         }
 
-        $this->log($billing['customer_id'], $billing['id'], $type, $channel, $sent ? 'sent' : 'failed');
+        if ($log) {
+            $this->log($billing['customer_id'], $billing['id'], $type, $channel, $sent ? 'sent' : 'failed', $sent ? null : ($this->deliveryError ?: 'Notification failed.'));
+        }
         $successMessage = $channel === 'sms'
             ? 'SMS accepted by the provider; handset delivery is not confirmed.'
             : ucfirst($channel) . ' notification sent.';
@@ -363,11 +365,11 @@ HTML;
         }
     }
 
-    private function log(int $customerId, int $billingId, string $type, string $channel, string $status): void
+    private function log(int $customerId, int $billingId, string $type, string $channel, string $status, ?string $error = null): void
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO notifications (customer_id, billing_id, type, channel, status) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO notifications (customer_id, billing_id, type, channel, status, error_message) VALUES (?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$customerId, $billingId, $type, $channel, $status]);
+        $stmt->execute([$customerId, $billingId, $type, $channel, $status, $error === null ? null : substr($error, 0, 255)]);
     }
 }

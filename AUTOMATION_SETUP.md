@@ -6,7 +6,7 @@ Verified payment confirmations are queued atomically and delivered on the next w
 
 Windows quick setup: copy the whole project to XAMPP's htdocs, import the database, start MySQL, and double-click install-notification-task.bat in the project root. Keep scripts/install_notification_task.ps1 with the project. The installer detects the project and PHP paths, checks the database connection without sending messages, and creates or updates the minute-by-minute scheduled task. It runs while the installing Windows user is logged in and the laptop is awake; locking the screen is fine. Set channels, reminder intervals, and delivery window in Billing Automation settings. The delivery window defaults to 08:00–20:00 and supports overnight hours. Rerun the installer after moving the project. Setup does not import the database or start MySQL automatically.
 
-Run database/migrate_telegram.php, database/migrate_automation.php, and database/migrate_delivery_window.php with PHP CLI when deploying to an existing database. These migrations preserve existing records; the delivery-window migration is idempotent.
+Run database/migrate_telegram.php, database/migrate_automation.php, database/migrate_delivery_window.php, and database/migrate_notification_hardening.php with PHP CLI when deploying to an existing database. These migrations preserve existing records; the delivery-window and notification-hardening migrations are idempotent.
 
 Run database/migrate_plan_catalog.php after the automation migration. It populates Residential, Business, and Lease Line categories with ten speed/rate options from the supplied price sheet. Business 200 Mbps is PHP 3,499/month as confirmed by the user. Manage the options at modules/services/plans.php. Existing services and configured plans are preserved.
 
@@ -18,7 +18,9 @@ Run `C:\xampp\php\php.exe scripts\run_billing.php --scheduled` every minute usin
 
 Notifications include new invoices, due-date changes, configurable pre-due reminders, due-day reminders, and repeated overdue reminders. Paid invoices skip reminders. Payment confirmations are queued atomically with verification and sent using the configured channels on the next in-window worker run. Balances use verified payments only. Due-date changes cancel unsent old reminders. Successful queue events are not repeated. Failed sends retry after 5 and 15 minutes, up to three attempts. Permanent failures are not retried. An ambiguous outcome, or a stale in-flight job older than 15 minutes, is marked failed with an unknown-outcome note for staff review and is never auto-resent. Provider acceptance does not guarantee handset delivery.
 
-Use scripts/run_billing.php --queue-only to generate invoices and queue notifications without sending them. This option changes billing records; it is not a dry run. Use tests/billing_automation.php and tests/notification_delivery.php for isolated verification in temporary tables without modifying live records or sending messages.
+Manual invoice and overdue sends remain immediate overrides outside the delivery window. A 60-second cooldown per invoice, notification type, and channel, plus a one-time request token, prevents duplicate sends. A successful or ambiguous manual send cancels matching pending automatic jobs for that invoice and channel, except payment confirmations.
+
+Use scripts/run_billing.php --queue-only to generate invoices and queue notifications without sending them. This option changes billing records; it is not a dry run. Use tests/billing_automation.php, tests/notification_delivery.php, and tests/manual_notification.php for isolated verification in temporary tables without modifying live records or sending messages.
 
 Deploy all changed PHP files plus the migration scripts; configure private notification credentials on the server. Test with the isolated test before enabling automation.
 

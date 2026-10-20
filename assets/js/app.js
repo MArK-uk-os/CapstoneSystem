@@ -29,3 +29,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 4000);
     });
 });
+
+document.addEventListener('submit', function (event) {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.matches('form[data-manual-send]')) return;
+    if (form.dataset.submitting === '1') {
+        event.preventDefault();
+        return;
+    }
+    form.dataset.submitting = '1';
+    form.querySelectorAll('button').forEach(function (button) {
+        button.disabled = true;
+    });
+}, true);
