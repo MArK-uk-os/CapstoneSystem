@@ -4,7 +4,14 @@ require_once __DIR__ . '/DisconnectionService.php';
 
 class BillingAutomation
 {
-    public function __construct(private PDO $pdo) {}
+    private const DELIVERY_START = '08:00:00';
+    private const DELIVERY_END = '20:00:00';
+    private const MAX_JOBS_PER_RUN = 50;
+    private const STALE_PROCESSING_MINUTES = 15;
+    private const MAX_ATTEMPTS = 3;
+    private const RETRY_MINUTES = [1 => 5, 2 => 15];
+
+    public function __construct(private PDO $pdo, private ?NotificationService $notifier = null) {}
 
     public static function nextPeriod(string $start, string $frequency): string
     {
@@ -15,31 +22,19 @@ class BillingAutomation
         return $target->setDate((int) $target->format('Y'), (int) $target->format('m'), $day)->format('Y-m-d');
     }
 
-    public static function dailyRunDue(array $settings, DateTimeImmutable $now): bool
+    public static function withinDeliveryWindow(?DateTimeImmutable $now=null): bool
     {
-        $now=$now->setTimezone(new DateTimeZone('Asia/Manila'));
-        return (bool)$settings['enabled'] && ($settings['last_scheduled_date']??null)!==$now->format('Y-m-d')
-            && $now->format('H:i:s')>=($settings['send_time']??'08:00:00');
+        $now=($now??new DateTimeImmutable('now',new DateTimeZone('Asia/Manila')))->setTimezone(new DateTimeZone('Asia/Manila'));
+        $time=$now->format('H:i:s');
+        return $time>=self::DELIVERY_START && $time<self::DELIVERY_END;
     }
 
-    public function runScheduled(): array
+    public function runScheduled(?DateTimeImmutable $now=null): array
     {
         if(!$this->pdo->query("SELECT GET_LOCK('cloudinterweb_daily_schedule',0)")->fetchColumn())return ['busy'=>true];
         try {
-            $settings=$this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
-            $now=new DateTimeImmutable('now',new DateTimeZone('Asia/Manila'));
-            // Invoice creation must not wait for (or miss) the daily reminder run.
-            $queued=$this->run(false);
-            if(isset($queued['busy']) || isset($queued['enabled']))return $queued;
-            if(!self::dailyRunDue($settings,$now)) {
-                $result=$this->run(true, true);
-                $result['generated']=($result['generated']??0)+$queued['generated'];
-                return ['waiting_for_daily_time'=>true] + $result;
-            }
-            $result=$this->run();
-            $result['generated']=($result['generated']??0)+$queued['generated'];
-            if(!isset($result['busy']) && !isset($result['enabled']))$this->pdo->prepare('UPDATE automation_settings SET last_scheduled_date=? WHERE id=1')->execute([$now->format('Y-m-d')]);
-            return $result;
+            $now=$now??new DateTimeImmutable('now',new DateTimeZone('Asia/Manila'));
+            return $this->run(true,false,$now);
         } finally {$this->pdo->query("SELECT RELEASE_LOCK('cloudinterweb_daily_schedule')");}
     }
 
@@ -63,12 +58,13 @@ class BillingAutomation
         }
     }
 
-    public function run(bool $deliver = true, bool $paymentsOnly = false): array
+    public function run(bool $deliver = true, bool $paymentsOnly = false, ?DateTimeImmutable $now=null): array
     {
         $settings = $this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
         if (!$settings['enabled']) return ['enabled' => false];
         if (!$this->pdo->query("SELECT GET_LOCK('cloudinterweb_billing_automation',0)")->fetchColumn()) return ['busy' => true];
         $generated = 0; $sent = 0; $failed = 0;
+        $now=$now??new DateTimeImmutable('now',new DateTimeZone('Asia/Manila'));
         try {
             if (!$paymentsOnly) {
             $subscriptions = $this->pdo->query("SELECT cs.id FROM customer_services cs JOIN customers c ON c.id=cs.customer_id JOIN services s ON s.id=cs.service_id WHERE cs.status IN ('active','disconnected') AND c.status='active' AND s.status='active' AND cs.next_billing_date<=CURDATE()")->fetchAll(PDO::FETCH_COLUMN);
@@ -108,28 +104,56 @@ class BillingAutomation
             }
             }
             if ($deliver) {
-                $notifier=new NotificationService($this->pdo);
+                $this->failStaleProcessing();
+                if (!self::withinDeliveryWindow($now)) return ['waiting_for_delivery_window'=>true,'generated'=>$generated,'sent'=>0,'failed'=>0];
+                $notifier=$this->notifier??new NotificationService($this->pdo);
+                $channels=array_values(array_filter(array_map('trim',explode(',',(string)$settings['channels']))));
                 $paymentFilter = $paymentsOnly ? " AND kind='payment'" : '';
-                $jobs=$this->pdo->query("SELECT * FROM notification_queue WHERE status='pending' AND next_attempt_at<=NOW()" . $paymentFilter . " ORDER BY id")->fetchAll();
+                $jobs=$this->pdo->query("SELECT * FROM notification_queue WHERE status='pending' AND next_attempt_at<=NOW()" . $paymentFilter . " ORDER BY id LIMIT ".self::MAX_JOBS_PER_RUN)->fetchAll();
                 foreach ($jobs as $job) {
+                    if (!in_array($job['channel'],$channels,true)) { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled',last_error='Channel disabled.' WHERE id=?")->execute([$job['id']]); continue; }
                     $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.telegram_chat_id,c.status customer_status,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
                     $days=(int)(new DateTimeImmutable(date('Y-m-d')))->diff(new DateTimeImmutable($bill['due_date']))->format('%r%a');
                     if ($job['kind'] !== 'payment' && ($bill['customer_status'] ?? '') !== 'active') { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=?")->execute([$job['id']]); continue; }
                     $expired=($job['kind']==='pre_due' && $days<=0) || ($job['kind']==='due' && $days!==0) || ($job['kind']==='overdue' && $days>=0);
                     if ($job['kind']!=='payment' && ($expired || $bill['due_date']!==$job['due_date'] || ($bill['status']==='paid' && $job['kind']!=='invoice'))) { $this->pdo->prepare("UPDATE notification_queue SET status='cancelled' WHERE id=?")->execute([$job['id']]); continue; }
-                    // Claim before network I/O: uncertain interrupted sends require staff review rather than duplicate retries.
-                    $this->pdo->prepare("UPDATE notification_queue SET status='processing',attempts=attempts+1 WHERE id=?")->execute([$job['id']]);
+                    $this->pdo->prepare("UPDATE notification_queue SET status='processing',attempts=attempts+1,next_attempt_at=NOW() WHERE id=?")->execute([$job['id']]);
                     if ($job['kind']==='payment') {
                         $query=$this->pdo->prepare("SELECT * FROM payments WHERE id=? AND billing_id=? AND verification_status='verified'");$query->execute([$job['payment_id'],$bill['id']]);$payment=$query->fetch();
-                        $result=$payment ? $notifier->sendPaymentConfirmation($bill,$payment,$job['channel']) : ['success'=>false,'message'=>'Verified payment not found.'];
+                        $result=$payment ? $notifier->sendPaymentConfirmation($bill,$payment,$job['channel']) : ['success'=>false,'message'=>'Verified payment not found.','retryable'=>false,'ambiguous'=>false];
                     } else $result=$job['kind']==='overdue' ? $notifier->sendOverdueNotification($bill,max(1,(int)(new DateTimeImmutable($bill['due_date']))->diff(new DateTimeImmutable(date('Y-m-d')))->days),$job['channel']) : $notifier->sendReminder($bill,$job['channel'],$job['kind']);
-                    $status=$result['success']?'sent':((int)$job['attempts']>=2?'failed':'pending');
-                    $this->pdo->prepare('UPDATE notification_queue SET status=?,last_error=?,next_attempt_at=DATE_ADD(NOW(),INTERVAL 6 HOUR) WHERE id=?')->execute([$status,$result['success']?null:$result['message'],$job['id']]);
-                    $result['success']?$sent++:$failed++;
+                    $attempt=(int)$job['attempts']+1;
+                    if ($result['success']) {
+                        $sent++;
+                        $this->pdo->prepare("UPDATE notification_queue SET status='sent',last_error=NULL,next_attempt_at=NOW() WHERE id=?")->execute([$job['id']]);
+                        continue;
+                    }
+                    $failed++;
+                    $message=(string)($result['message']??'Notification failed.');
+                    $ambiguous=!empty($result['ambiguous']);
+                    $retryable=!empty($result['retryable']);
+                    if ($ambiguous && stripos($message,'Outcome unknown')!==0) $message='Outcome unknown: '.$message.' Review delivery before retrying.';
+                    $message=self::truncateError($message);
+                    if ($ambiguous || !$retryable || $attempt>=self::MAX_ATTEMPTS) {
+                        $this->pdo->prepare("UPDATE notification_queue SET status='failed',last_error=?,next_attempt_at=NOW() WHERE id=?")->execute([$message,$job['id']]);
+                    } else {
+                        $minutes=self::RETRY_MINUTES[$attempt]??15;
+                        $this->pdo->prepare("UPDATE notification_queue SET status='pending',last_error=?,next_attempt_at=DATE_ADD(NOW(),INTERVAL ? MINUTE) WHERE id=?")->execute([$message,$minutes,$job['id']]);
+                    }
                 }
             }
             return compact('generated','sent','failed');
         } finally { $this->pdo->query("SELECT RELEASE_LOCK('cloudinterweb_billing_automation')"); }
+    }
+
+    private function failStaleProcessing(): void
+    {
+        $this->pdo->exec("UPDATE notification_queue SET status='failed',last_error='Outcome unknown: previous send was interrupted. Review delivery before retrying.' WHERE status='processing' AND next_attempt_at<DATE_SUB(NOW(),INTERVAL ".self::STALE_PROCESSING_MINUTES." MINUTE)");
+    }
+
+    private static function truncateError(string $message): string
+    {
+        return function_exists('mb_substr')?mb_substr($message,0,255):substr($message,0,255);
     }
 
     public function queuePayment(int $invoiceId,int $paymentId):void
