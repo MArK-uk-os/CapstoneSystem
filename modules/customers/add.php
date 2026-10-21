@@ -23,15 +23,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
         $errors[] = 'Invalid request. Please try again.';
     } else {
-        foreach ($values as $key => $_) {
-            $values[$key] = trim($_POST[$key] ?? '');
+        $first = trim($_POST['first_name'] ?? '');
+        $middle = trim($_POST['middle_initial'] ?? '');
+        $last = trim($_POST['last_name'] ?? '');
+        $suffix = trim($_POST['suffix'] ?? '');
+        $contact = normalizeContactNumber($_POST['contact_number'] ?? '');
+        $email = trim($_POST['email'] ?? '');
+        $address = trim($_POST['address'] ?? '');
+        $planId = trim($_POST['plan_id'] ?? '');
+        $namePattern = "/^[\p{L}][\p{L} .\-]{0,49}$/u";
+
+        if ($first === '') $errors[] = 'First name is required.';
+        if ($last === '') $errors[] = 'Last name is required.';
+        $hasNameDigit = false;
+        foreach ([$first, $middle, $last, $suffix] as $namePart) {
+            if (preg_match('/\d/', $namePart)) $hasNameDigit = true;
+        }
+        if ($hasNameDigit) {
+            $errors[] = 'Names must contain letters only.';
+        } else {
+            if ($first !== '' && !preg_match($namePattern, $first)) $errors[] = 'First name may only contain letters, spaces, periods, and hyphens.';
+            if ($last !== '' && !preg_match($namePattern, $last)) $errors[] = 'Last name may only contain letters, spaces, periods, and hyphens.';
+            if ($middle !== '' && !preg_match('/^\p{L}$/u', $middle)) $errors[] = 'Middle initial must be a single letter.';
+            if ($suffix !== '' && !in_array($suffix, CUSTOMER_SUFFIXES, true)) $errors[] = 'Select a valid suffix.';
+        }
+        if ($contact === '') $errors[] = 'Contact number is required.';
+        elseif (!validPhMobile($contact)) $errors[] = 'Contact number must be a Philippine mobile number in 09XXXXXXXXX format.';
+        if ($email === '') $errors[] = 'Email address is required.';
+        elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) $errors[] = 'Email address is invalid.';
+        if (!$errors) {
+            if (($dup = findDuplicateCustomer($pdo, 'contact_number', $contact))) $errors[] = 'Contact number ' . $contact . ' is already used by customer ' . $dup['account_number'] . ' (' . $dup['full_name'] . ').';
+            if (($dup = findDuplicateCustomer($pdo, 'email', $email))) $errors[] = 'Email address ' . $email . ' is already used by customer ' . $dup['account_number'] . ' (' . $dup['full_name'] . ').';
         }
 
-        $validated = validateCustomer($pdo, $values, ['contact_required' => true, 'email_required' => true]);
-        $errors = $validated['errors'];
-        $values = $validated['values'] + [
-            'address' => $values['address'],
-            'plan_id' => $values['plan_id'],
+        $middle = $middle === '' ? null : strtoupper(rtrim($middle, '.'));
+        $values = [
+            'first_name' => $first,
+            'middle_initial' => $middle ?? '',
+            'last_name' => $last,
+            'suffix' => $suffix,
+            'contact_number' => $contact,
+            'email' => $email,
+            'address' => $address,
+            'plan_id' => $planId,
+            'full_name' => fullNameFromParts($first, $middle ?? '', $last, $suffix),
         ];
 
         if (!ctype_digit($values['plan_id']) || !in_array((int)$values['plan_id'], array_map('intval', array_column($plans,'id')), true)) $errors[] = 'Select an available internet plan.';
@@ -104,15 +139,15 @@ include __DIR__ . '/../../includes/sidebar.php';
             <div class="row g-3">
                 <div class="col-md-4">
                     <label class="form-label">First Name</label>
-                    <input type="text" name="first_name" class="form-control" maxlength="50" pattern="[A-Za-z][A-Za-z '\-]{0,49}" title="Letters only. Spaces, hyphens, and apostrophes are allowed." value="<?= htmlspecialchars($values['first_name']) ?>" required>
+                    <input type="text" name="first_name" class="form-control" maxlength="50" pattern="[A-Za-zÑñ][A-Za-zÑñ .\-]{0,49}" title="Letters, spaces, periods, and hyphens only." value="<?= htmlspecialchars($values['first_name']) ?>" required>
                 </div>
                 <div class="col-md-2">
                     <label class="form-label">Middle Initial</label>
-                    <input type="text" name="middle_initial" class="form-control" maxlength="2" pattern="[A-Za-z]\.?" title="One letter, with an optional period." value="<?= htmlspecialchars($values['middle_initial']) ?>">
+                    <input type="text" name="middle_initial" class="form-control" maxlength="1" pattern="[A-Za-zÑñ]" title="One letter only." value="<?= htmlspecialchars($values['middle_initial']) ?>">
                 </div>
                 <div class="col-md-4">
                     <label class="form-label">Last Name</label>
-                    <input type="text" name="last_name" class="form-control" maxlength="50" pattern="[A-Za-z][A-Za-z '\-]{0,49}" title="Letters only. Spaces, hyphens, and apostrophes are allowed." value="<?= htmlspecialchars($values['last_name']) ?>" required>
+                    <input type="text" name="last_name" class="form-control" maxlength="50" pattern="[A-Za-zÑñ][A-Za-zÑñ .\-]{0,49}" title="Letters, spaces, periods, and hyphens only." value="<?= htmlspecialchars($values['last_name']) ?>" required>
                 </div>
                 <div class="col-md-2">
                     <label class="form-label">Suffix</label>
