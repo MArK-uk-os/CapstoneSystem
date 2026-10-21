@@ -25,14 +25,13 @@ $values = [
     'email' => (string) ($customer['email'] ?? ''),
     'address' => (string) ($customer['address'] ?? ''),
     'status' => (string) $customer['status'],
-    'telegram_chat_id' => (string) ($customer['telegram_chat_id'] ?? ''),
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
         $errors[] = 'Invalid request. Please try again.';
     } else {
-        foreach (['first_name', 'middle_initial', 'last_name', 'suffix', 'contact_number', 'email', 'address', 'status', 'telegram_chat_id'] as $key) {
+        foreach (['first_name', 'middle_initial', 'last_name', 'suffix', 'contact_number', 'email', 'address', 'status'] as $key) {
             $values[$key] = trim($_POST[$key] ?? '');
         }
 
@@ -41,15 +40,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $values = $validated['values'] + [
             'address' => $values['address'],
             'status' => $values['status'],
-            'telegram_chat_id' => $values['telegram_chat_id'],
         ];
-
-        if ($values['telegram_chat_id'] !== '' && !preg_match('/^[1-9][0-9]{0,19}$/', $values['telegram_chat_id'])) $errors[] = 'Enter a valid private Telegram chat ID.';
 
         if (!$errors) {
             try {
                 $update = $pdo->prepare(
-                    'UPDATE customers SET full_name = ?, first_name = ?, middle_initial = ?, last_name = ?, suffix = ?, contact_number = ?, email = ?, address = ?, status = ?, telegram_chat_id = ? WHERE id = ?'
+                    'UPDATE customers SET full_name = ?, first_name = ?, middle_initial = ?, last_name = ?, suffix = ?, contact_number = ?, email = ?, address = ?, status = ? WHERE id = ?'
                 );
                 $update->execute([
                     $values['full_name'],
@@ -61,7 +57,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $values['email'] !== '' ? $values['email'] : null,
                     $values['address'],
                     $values['status'],
-                    $values['telegram_chat_id'] ?: null,
                     $id,
                 ]);
                 header('Location: index.php?msg=' . urlencode('Customer updated successfully.'));
@@ -124,7 +119,7 @@ include __DIR__ . '/../../includes/sidebar.php';
                     <div class="form-text">Must be unique if provided.</div>
                 </div>
                 <div class="col-12">
-                    <label class="form-label">Telegram Chat ID</label><input class="form-control mb-2" name="telegram_chat_id" value="<?= htmlspecialchars($values['telegram_chat_id']) ?>"><small>Customer must start @CloudInterBot. Use their own private chat ID.</small><br><label class="form-label">Address</label>
+                    <label class="form-label">Address</label>
                     <input type="text" name="address" class="form-control" value="<?= htmlspecialchars($values['address']) ?>">
                 </div>
                 <div class="col-md-6">

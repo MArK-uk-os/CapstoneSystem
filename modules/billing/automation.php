@@ -3,7 +3,7 @@ require_once __DIR__ . '/../../includes/auth.php'; requireRole('admin');
 require_once __DIR__ . '/../../includes/BillingAutomation.php';
 $pdo=getDbConnection(); $notice='';
 if ($_SERVER['REQUEST_METHOD']==='POST' && verifyCsrfToken($_POST['csrf_token']??null)) {
-    $channels=array_values(array_intersect(['telegram','email','sms'],(array)($_POST['channels']??[])));
+    $channels=array_values(array_intersect(['email','sms'],(array)($_POST['channels']??[])));
     $pre=filter_var($_POST['pre_due_days']??'',FILTER_VALIDATE_INT,['options'=>['min_range'=>0,'max_range'=>30]]);
     $repeat=filter_var($_POST['overdue_repeat_days']??'',FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>60]]);
     $follow=filter_var($_POST['follow_up_days']??'',FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>60]]);
@@ -28,7 +28,7 @@ $pageTitle='Billing Automation'; include __DIR__.'/../../includes/header.php'; i
 <label><input type="checkbox" name="enabled" <?= $settings['enabled']?'checked':'' ?>> Enable automation</label>
 <?php $windowStartLabel=htmlspecialchars(substr((string)($settings['delivery_window_start']??'08:00:00'),0,5)); $windowEndLabel=htmlspecialchars(substr((string)($settings['delivery_window_end']??'20:00:00'),0,5)); ?>
 <p class="text-muted mt-3">Notifications are delivered from <?= $windowStartLabel ?> to <?= $windowEndLabel ?> Philippine time. Eligible notices queued outside that window wait for the next window. Payment confirmations are transactional and use the next worker tick even outside the window. Pre-due and due reminders are generated once per billing period; overdue reminders wait for the configured repeat interval after the last sent overdue notice.</p>
-<div class="my-3"><?php foreach(['telegram','email','sms'] as $channel): ?><label class="me-3"><input type="checkbox" name="channels[]" value="<?= $channel ?>" <?= in_array($channel,explode(',',$settings['channels']))?'checked':'' ?>> <?= ucfirst($channel) ?></label><?php endforeach; ?></div>
+<div class="my-3"><?php foreach(['email','sms'] as $channel): ?><label class="me-3"><input type="checkbox" name="channels[]" value="<?= $channel ?>" <?= in_array($channel,explode(',',$settings['channels']))?'checked':'' ?>> <?= ucfirst($channel) ?></label><?php endforeach; ?></div>
 <label>Days before due date (0 disables pre-due reminders)</label><input class="form-control mb-3" type="number" min="0" max="30" name="pre_due_days" value="<?= $settings['pre_due_days'] ?>">
 <label>Repeat overdue reminder every (days)</label><input class="form-control mb-3" type="number" min="1" max="60" name="overdue_repeat_days" value="<?= $settings['overdue_repeat_days'] ?>">
 <label>First collection follow-up after (days)</label><input class="form-control mb-3" type="number" min="1" max="60" name="follow_up_days" value="<?= $settings['follow_up_days'] ?>">
