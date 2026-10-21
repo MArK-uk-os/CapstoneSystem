@@ -117,22 +117,14 @@ class NotificationService
         $this->deliveryRetryable = false;
         $this->deliveryAmbiguous = false;
         $this->deliveryFailureClass = 'pre_send';
-        if (!in_array($channel, ['sms', 'email', 'telegram'], true)) {
+        if (!in_array($channel, ['sms', 'email'], true)) {
             return ['success' => false, 'message' => 'Invalid notification channel.', 'retryable' => false, 'ambiguous' => false, 'failure_class' => 'pre_send'];
         }
 
         try {
-            if ($channel === 'telegram') {
-                $lookup = $this->pdo->prepare('SELECT telegram_chat_id FROM customers WHERE id = ?');
-                $lookup->execute([$billing['customer_id']]);
-                $chatId = $lookup->fetchColumn();
-                if (!$chatId) return ['success' => false, 'message' => 'Link a Telegram chat ID in Edit Customer first.', 'retryable' => false, 'ambiguous' => false, 'failure_class' => 'pre_send'];
-                $sent = $this->sendTelegram((string) $chatId, $subject . "\n\n" . $message);
-            } else {
             $sent = $channel === 'sms'
                 ? $this->sendSms($billing['contact_number'] ?? '', $message)
                 : $this->sendEmail($billing['email'] ?? '', $billing['full_name'], $subject, $message, $this->renderEmail($billing, $type, $message, $payment));
-            }
         } catch (Throwable $exception) {
             $sent = false;
             if ($this->deliveryError === '') $this->fail('Unexpected provider error: ' . $exception->getMessage(), false, true, 'post_send_unknown');
@@ -193,22 +185,6 @@ class NotificationService
             && in_array(strtolower($response[0]['status'] ?? ''), ['queued','pending','sent'], true);
         if ($accepted) return true;
         return $this->failHttp($statusCode, 'SMS provider');
-    }
-
-    private function sendTelegram(string $chatId, string $message): bool
-    {
-        if ($this->config['telegram_bot_token'] === '' || !function_exists('curl_init')) return $this->fail('Telegram is not configured.');
-        $request = curl_init('https://api.telegram.org/bot' . $this->config['telegram_bot_token'] . '/sendMessage');
-        curl_setopt_array($request, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query(['chat_id' => $chatId, 'text' => $message]), CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 15]);
-        $body = curl_exec($request);
-        $code = (int) curl_getinfo($request, CURLINFO_RESPONSE_CODE);
-        $errno = curl_errno($request);
-        $error = curl_error($request);
-        curl_close($request);
-        if ($body === false) return $this->curlFailure($errno, $error, 'Telegram');
-        $data = json_decode($body ?: '', true);
-        if ($code === 200 && ($data['ok'] ?? false) === true) return true;
-        return $this->failHttp($code, 'Telegram');
     }
 
     public static function normalizeSmsNumber(string $number): ?string

@@ -1,8 +1,6 @@
 <?php
 
 $config = [
-    'telegram_bot_token' => getenv('TELEGRAM_BOT_TOKEN') ?: '',
-    'mobile_notification_channel' => getenv('MOBILE_NOTIFICATION_CHANNEL') ?: 'sms',
     'sms_provider' => getenv('SMS_PROVIDER') ?: 'semaphore',
     'httpsms_api_key' => getenv('HTTPSMS_API_KEY') ?: '',
     'httpsms_from' => getenv('HTTPSMS_FROM') ?: '',

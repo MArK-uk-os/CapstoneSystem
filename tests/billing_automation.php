@@ -12,7 +12,7 @@ foreach(['customers','services','customer_services','billing','payments','collec
 $pdo->exec("INSERT INTO customers (id,account_number,full_name,status) VALUES (1,'CUST-TEST','Automation Test','active')");
 $pdo->exec("INSERT INTO services (id,service_name,monthly_fee) VALUES (1,'Internet',100)");
 $pdo->exec("INSERT INTO internet_plans (id,name,speed_mbps,monthly_rate,enabled) VALUES (1,'Test Plan',50,799,1)");
-$pdo->exec("INSERT INTO automation_settings (id,enabled,channels,pre_due_days) VALUES (1,1,'telegram,email',3)");
+$pdo->exec("INSERT INTO automation_settings (id,enabled,channels,pre_due_days) VALUES (1,1,'sms,email',3)");
 $pdo->exec("INSERT INTO customer_services (id,customer_id,service_id,plan_id,billing_amount,start_date,next_billing_date,service_account_number) VALUES (1,1,1,1,1,CURDATE(),CURDATE(),'ACC-TEST')");
 $engine=new BillingAutomation($pdo);$result=$engine->run(false);
 check($result['generated']===1,'Expected one scheduled invoice');

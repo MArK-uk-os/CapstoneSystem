@@ -19,7 +19,7 @@ class ManualNotificationService
 
     private function send(string $type, array $billing, string $channel, string $requestKey, int $userId, callable $dispatch): array
     {
-        if (!in_array($channel, ['sms', 'email', 'telegram'], true)) {
+        if (!in_array($channel, ['sms', 'email'], true)) {
             return $this->result(false, 'Invalid notification channel.', 'danger');
         }
         if (!preg_match('/^[a-f0-9]{32,64}$/', $requestKey)) {

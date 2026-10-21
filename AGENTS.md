@@ -20,7 +20,7 @@ Billing & Collection Management System (Cloud Interweb) — vanilla PHP + MySQL,
 
 ## Architecture
 - `includes/auth.php` — session bootstrap + guard. Every protected page starts with `require_once includes/auth.php;` then `requireLogin()` or `requireRole('admin')`. Provides `hasRole`, `currentUser`, and CSRF helpers `csrfToken()` / `verifyCsrfToken()`.
-- `includes/BillingAutomation.php` — core engine: `synchronize()` recomputes billing/collection status from verified payments, `run()/runScheduled()` generate invoices and drive the notification queue. `includes/notifications/NotificationService.php` — channel sending (telegram/email/SMS providers: semaphore, httpsms, infobip).
+- `includes/BillingAutomation.php` — core engine: `synchronize()` recomputes billing/collection status from verified payments, `run()/runScheduled()` generate invoices and drive the notification queue. `includes/notifications/NotificationService.php` — channel sending (email/SMS providers: semaphore, httpsms, infobip).
 - `DB` access via `getDbConnection()` (singleton PDO, `ERRMODE_EXCEPTION`, `FETCH_ASSOC`, no emulated prepares). Use prepared statements.
 - Multi-service model: subscriptions live in `customer_services` (each has its own `service_account_number`); `customers.service_id` is legacy. Billing stores `service_name_snapshot` / `account_number_snapshot`. Plan catalog is `internet_plans` (managed at `modules/services/plans.php`).
 - Status conventions: `billing.status` = `unpaid|paid|overdue`; collection status in `collections.collection_status`. Balances count only `payments.verification_status='verified'`.

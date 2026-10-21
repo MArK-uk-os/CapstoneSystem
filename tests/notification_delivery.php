@@ -88,10 +88,10 @@ check(count($fake->calls)===1,'Provider must be called once');
 $engine->run(true,false,$inside);
 check(count($fake->calls)===1,'Repeated run must not resend a sent job');
 
-resetQueue($pdo);$email=addJob($pdo,'invoice','email');$telegram=addJob($pdo,'invoice','telegram');$fake->calls=[];
+resetQueue($pdo);$email=addJob($pdo,'invoice','email');$disabled=addJob($pdo,'invoice','slack');$fake->calls=[];
 $engine->run(true,false,$inside);
 check(row($pdo,$email)['status']==='sent','Enabled channel must be sent');
-check(row($pdo,$telegram)['status']==='cancelled','Disabled channel must be cancelled');
+check(row($pdo,$disabled)['status']==='cancelled','Disabled channel must be cancelled');
 check($fake->calls===['invoice:email'],'Disabled channel must not reach the provider');
 
 resetQueue($pdo);$job=addJob($pdo,'invoice','email');$fake->calls=[];$fake->mode='retry';

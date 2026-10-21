@@ -14,10 +14,6 @@ $status = $pdo->query("SHOW COLUMNS FROM notifications LIKE 'status'")->fetch();
 if ($status && !str_contains($status['Type'], 'processing')) {
     $pdo->exec("ALTER TABLE notifications MODIFY status ENUM('processing','sent','delivered','failed') NOT NULL DEFAULT 'sent'");
 }
-$channel = $pdo->query("SHOW COLUMNS FROM notifications LIKE 'channel'")->fetch();
-if ($channel && !str_contains($channel['Type'], 'telegram')) {
-    $pdo->exec("ALTER TABLE notifications MODIFY channel ENUM('sms','email','telegram') NOT NULL");
-}
 if (!$pdo->query("SHOW INDEX FROM notifications WHERE Key_name='uq_notifications_request_key'")->fetch()) {
     $pdo->exec('ALTER TABLE notifications ADD UNIQUE KEY uq_notifications_request_key (request_key)');
 }

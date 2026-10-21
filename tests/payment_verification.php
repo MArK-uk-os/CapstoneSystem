@@ -77,7 +77,7 @@ $jobs=[
     addQueueJob($pdo,1,'invoice','email'),
     addQueueJob($pdo,1,'pre_due','email','failed'),
     addQueueJob($pdo,1,'due','sms'),
-    addQueueJob($pdo,1,'overdue','telegram'),
+    addQueueJob($pdo,1,'overdue','sms'),
     addQueueJob($pdo,1,'due_changed','email'),
 ];
 $paymentJob=addQueueJob($pdo,1,'payment','email','pending',1);

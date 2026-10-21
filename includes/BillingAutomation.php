@@ -73,7 +73,7 @@ class BillingAutomation
         $stmt = $this->pdo->prepare('SELECT due_date FROM billing WHERE id=?'); $stmt->execute([$id]);
         $due = $stmt->fetchColumn();
         foreach (explode(',', $settings['channels']) as $channel) {
-            if (!in_array($channel, ['telegram','sms','email'], true)) continue;
+            if (!in_array($channel, ['sms','email'], true)) continue;
             $key = implode(':', [$id,$kind,$due,$suffix,$channel]);
             $this->pdo->prepare('INSERT IGNORE INTO notification_queue (event_key,billing_id,kind,channel,due_date) VALUES (?,?,?,?,?)')->execute([$key,$id,$kind,$channel,$due]);
         }
@@ -89,7 +89,7 @@ class BillingAutomation
         if ($due===false) return;
         $bucket=(string)intdiv(-$overdueDays-1,$repeatDays);
         foreach (explode(',',$settings['channels']) as $channel) {
-            if (!in_array($channel,['telegram','sms','email'],true)) continue;
+            if (!in_array($channel,['sms','email'],true)) continue;
             $recent=$this->pdo->prepare("SELECT id FROM notifications WHERE billing_id=? AND type='overdue' AND channel=? AND status IN ('processing','sent','delivered') AND sent_at>DATE_SUB(NOW(),INTERVAL $repeatDays DAY) LIMIT 1");
             $recent->execute([$id,$channel]);
             if ($recent->fetchColumn()) {
@@ -182,7 +182,7 @@ class BillingAutomation
                             $this->pdo->prepare("UPDATE notification_queue SET status='cancelled',last_error='Channel disabled.' WHERE id=? AND status='pending'")->execute([$job['id']]);
                             continue;
                         }
-                        $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.telegram_chat_id,c.status customer_status,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
+                        $query=$this->pdo->prepare("SELECT b.*,c.full_name,c.email,c.contact_number,c.status customer_status,GREATEST(b.amount-COALESCE(p.paid,0),0) outstanding_balance FROM billing b JOIN customers c ON c.id=b.customer_id LEFT JOIN (SELECT billing_id,SUM(amount_paid) paid FROM payments WHERE verification_status='verified' GROUP BY billing_id) p ON p.billing_id=b.id WHERE b.id=?"); $query->execute([$job['billing_id']]); $bill=$query->fetch();
                         if (!$bill) {
                             $this->pdo->prepare("UPDATE notification_queue SET status='failed',failure_class='pre_send',last_error='Billing record not found.' WHERE id=? AND status='pending'")->execute([$job['id']]);
                             $failed++;
@@ -306,7 +306,7 @@ class BillingAutomation
         $settings=$this->pdo->query('SELECT * FROM automation_settings WHERE id=1')->fetch();
         $query=$this->pdo->prepare('SELECT due_date FROM billing WHERE id=?');$query->execute([$invoiceId]);$due=$query->fetchColumn();
         foreach(explode(',',$settings['channels']) as $channel) {
-            if(!in_array($channel,['telegram','email','sms'],true))continue;
+            if(!in_array($channel,['email','sms'],true))continue;
             $this->pdo->prepare("INSERT IGNORE INTO notification_queue(event_key,billing_id,payment_id,kind,channel,due_date) VALUES (?,?,?,'payment',?,?)")->execute(['payment:'.$paymentId.':'.$channel,$invoiceId,$paymentId,$channel,$due]);
         }
     }

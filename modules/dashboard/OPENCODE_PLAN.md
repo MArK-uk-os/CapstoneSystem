@@ -59,5 +59,5 @@ Files: `AUTOMATION_SETUP.md`, `AGENTS.md`, `modules/dashboard/DISCONNECTION_SPEC
 - "reconnected" reset timing: if reset too early it hides an unpaid account; if never, it stays forever. The plan resets it when the next cycle's invoice is generated.
 - Plan flag only covers plan-based services. Services with plan_id = NULL use billing_amount (`BillingAutomation.php:81`). We treat those as "applies" for now.
 - Run migrations while the scheduler is paused. Stop the Task Scheduler job first, take a DB backup, then migrate.
-- `notifications.channel` ENUM is only sms,email (`schema.sql:141`) but the code already logs telegram. This is a pre-existing bug. Optional fix: add telegram to that ENUM in Task 2.
+- Telegram was removed from application code; the legacy Telegram enum value and customer chat column remain only for database backward compatibility.
 - `verify.php` assumes one invoice per payment and rejects overpayment (`verify.php:26`). Recording balance + fee as separate invoices avoids that limit.
